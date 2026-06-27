@@ -1,0 +1,17 @@
+{
+  "name": "kiv-clinic",
+  "version": "0.1.0",
+  "private": true,
+  "description": "KIV Clinic — veterinary clinic management (GitHub Pages + Apps Script + Sheets + Drive)",
+  "scripts": {
+    "clasp": "clasp",
+    "push": "clasp push",
+    "open": "clasp open-script",
+    "deploy": "clasp deploy",
+    "deployments": "clasp list-deployments",
+    "logs": "clasp tail-logs"
+  },
+  "devDependencies": {
+    "@google/clasp": "^2.4.2"
+  }
+}

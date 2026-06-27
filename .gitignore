@@ -1,2 +1,14 @@
 # Personal / local-only Claude Code settings — never commit
 .claude/settings.local.json
+
+# Node / tooling
+node_modules/
+npm-debug.log*
+
+# clasp credentials (never commit secrets); keep .clasp.json (project id, non-secret)
+.clasprc.json
+apps-script/.clasprc.json
+
+# Local-only secrets — never commit (admin password, bootstrap token, etc.)
+CREDENTIALS.local.md
+*.secret.md
