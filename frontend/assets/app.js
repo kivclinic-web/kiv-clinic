@@ -6,7 +6,12 @@ import {
   useApi, useEvent, openForm
 } from './core.js';
 import { setSession, clearSession } from './api.js';
-import { APP_NAME } from './config.js';
+import { APP_NAME, API_BASE } from './config.js';
+
+// Warm the Apps Script container early (it cold-starts after idle, ~20s+). Fire-and-forget GET ping
+// on load so the runtime is warming while the user reads/types — turns a ~27s first call into ~3s.
+let _warmed = false;
+function warmUp() { if (_warmed) return; _warmed = true; try { fetch(API_BASE + '?action=ping', { method: 'GET', mode: 'no-cors' }).catch(() => {}); } catch {} }
 import { FormHost } from './forms.js';
 import { Clients, Pets, PetTimeline } from './screens-people.js';
 import { Consultation, Appointments, Vaccinations } from './screens-clinical.js';
@@ -216,4 +221,5 @@ function App() {
     ${quick && html`<${QuickAdd} close=${() => setQuick(false)}/>`}`;
 }
 
+warmUp();
 render(html`<${App}/>`, document.getElementById('root'));
