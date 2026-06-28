@@ -1,7 +1,7 @@
 // screens-people.js — Clients, Pets, and the Pet medical timeline (signature interaction #3).
 import {
   html, useState, useEffect, api, asList, isAdmin, go, Icon, toast, refreshAll, useEvent,
-  useApi, useMutation, Modal, ConfirmDialog, EmptyState, ErrorState, Loading, SkeletonRows,
+  useApi, useDebounce, useMutation, Modal, ConfirmDialog, EmptyState, ErrorState, Loading, SkeletonRows, FreshnessLabel,
   initials, colorFor, fmtDate, inr, ageText, openForm
 } from './core.js';
 
@@ -15,14 +15,15 @@ function useLiveApi(action, payload, deps = []) {
 /* ============ Clients ============ */
 export function Clients() {
   const [q, setQ] = useState('');
-  const clients = useLiveApi('clients.list', { search: q, limit: 200 }, [q]);
+  const dq = useDebounce(q);
+  const clients = useLiveApi('clients.list', { search: dq, limit: 200 }, [dq]);
   const pets = useLiveApi('pets.list', { limit: 500 }, []);
   const [detail, setDetail] = useState(null);
   const byClient = {};
   asList(pets.data).forEach(p => { (byClient[p.client_id] = byClient[p.client_id] || []).push(p); });
 
   return html`<section data-screen-label="Clients">
-    <div class="hdr"><div><div class="h-ey">Pet owners</div><div class="h-ttl">Clients</div></div>
+    <div class="hdr"><div><div class="h-ey">Pet owners <${FreshnessLabel} at=${clients.fetchedAt} stale=${clients.stale} error=${clients.refreshError}/></div><div class="h-ttl">Clients</div></div>
       <button class="btn pri" onClick=${() => openForm('client')}><span class="nico">${Icon('plus')}</span>Add client</button></div>
     <div class="field" style="max-width:420px"><div class="search" style="max-width:none"><span class="nico">${Icon('search')}</span><input style="border:none;outline:none;background:none;flex:1;color:var(--ink)" placeholder="Search by name or mobile" value=${q} onInput=${e => setQ(e.target.value)}/></div></div>
     ${clients.loading ? SkeletonRows(4) : clients.error ? html`<${ErrorState} error=${clients.error} onRetry=${clients.reload}/>` :
@@ -60,9 +61,10 @@ function ClientDetail({ client, pets, close }) {
 /* ============ Pets ============ */
 export function Pets() {
   const [q, setQ] = useState('');
-  const pets = useLiveApi('pets.list', { search: q, limit: 300 }, [q]);
+  const dq = useDebounce(q);
+  const pets = useLiveApi('pets.list', { search: dq, limit: 300 }, [dq]);
   return html`<section data-screen-label="Pets">
-    <div class="hdr"><div><div class="h-ey">Patients</div><div class="h-ttl">Pets</div></div>
+    <div class="hdr"><div><div class="h-ey">Patients <${FreshnessLabel} at=${pets.fetchedAt} stale=${pets.stale} error=${pets.refreshError}/></div><div class="h-ttl">Pets</div></div>
       <button class="btn pri" onClick=${() => openForm('pet')}><span class="nico">${Icon('plus')}</span>Add pet</button></div>
     <div class="field" style="max-width:420px"><div class="search" style="max-width:none"><span class="nico">${Icon('search')}</span><input style="border:none;outline:none;background:none;flex:1;color:var(--ink)" placeholder="Search by name, breed or owner" value=${q} onInput=${e => setQ(e.target.value)}/></div></div>
     ${pets.loading ? SkeletonRows(4) : pets.error ? html`<${ErrorState} error=${pets.error} onRetry=${pets.reload}/>` :
@@ -105,7 +107,7 @@ export function PetTimeline({ id }) {
   return html`<section data-screen-label="Pet record"><div class="petgrid">
     <div class="vitals">
       <div class="card pad">
-        <div class="pethead"><span class="petav" style="background:${colorFor(pet.id)}">${initials(pet.name)}</span><div><h2 style="font-size:24px">${pet.name}</h2><div class="alsub">${pet.breed} · ${cap(pet.species)}</div></div></div>
+        <div class="pethead"><span class="petav" style="background:${colorFor(pet.id)}">${initials(pet.name)}</span><div><h2 style="font-size:24px">${pet.name}</h2><div class="alsub">${pet.breed} · ${cap(pet.species)} <${FreshnessLabel} at=${rec.fetchedAt} stale=${rec.stale} error=${rec.refreshError}/></div></div></div>
         <div class="vrow"><span>Owner</span><b>${client ? client.name : '—'}</b></div>
         <div class="vrow"><span>Mobile</span><b>${client ? client.mobile : '—'}</b></div>
         <div class="vrow"><span>Age</span><b>${ageText(pet.age_months)}</b></div>

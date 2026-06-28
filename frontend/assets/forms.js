@@ -2,7 +2,7 @@
 // + inline field errors (e.g. duplicate mobile). FormHost renders the right form for `openForm(entity)`.
 import {
   html, useState, useEffect, api, asList, toast, refreshAll, go, Icon, copyText,
-  useApi, useMutation, useEvent, Modal, Field, Input, Textarea, Select, Seg, SaveButton, Spinner
+  useApi, useMutation, useEvent, Modal, Field, Input, Textarea, Select, Seg, SaveButton, Spinner, FauxProgress
 } from './core.js';
 
 const ferr = (errs, key) => errs && errs[key];
@@ -37,10 +37,11 @@ export function PetForm({ props, close }) {
   const m = useMutation(edit ? 'pets.update' : 'pets.create', { successMsg: edit ? 'Pet updated' : 'Pet added', onSuccess: () => { refreshAll(); close(); } });
   const submit = (e) => { e.preventDefault(); m.run(edit ? { id: init.id, ...f } : f).catch(() => {}); };
   const clientOpts = [['', '— Select owner —'], ...asList(clients.data).map(c => [c.id, `${c.name} · ${c.mobile}`])];
+  const ownerLoading = !props.client_id && clients.loading && !clients.data;
   return html`<${Modal} title=${edit ? 'Edit pet' : 'Add pet'} onClose=${close}
-    footer=${html`<button class="btn gho" onClick=${close}>Cancel</button><${SaveButton} busy=${m.busy} label=${edit ? 'Save changes' : 'Add pet'} onClick=${submit}/>`}>
+    footer=${html`<button class="btn gho" onClick=${close}>Cancel</button><${SaveButton} busy=${m.busy} disabled=${ownerLoading} label=${edit ? 'Save changes' : 'Add pet'} onClick=${submit}/>`}>
     <form onSubmit=${submit}>
-      ${!props.client_id && html`<${Field} label="Owner" error=${ferr(m.fieldErrors, 'client_id') && 'Choose a valid owner.'}><${Select} value=${f.client_id} onInput=${set('client_id')} options=${clientOpts}/><//>`}
+      ${!props.client_id && html`<${Field} label="Owner" error=${(ferr(m.fieldErrors, 'client_id') && 'Choose a valid owner.') || (clients.error && !clients.data && 'Couldn’t load owners — retry.')}><${Select} value=${f.client_id} onInput=${set('client_id')} options=${clientOpts} loading=${ownerLoading}/><//>`}
       <${Field} label="Pet name" error=${ferr(m.fieldErrors, 'name')}><${Input} value=${f.name} onInput=${set('name')} autofocus=${true}/><//>
       <div class="formgrid">
         <${Field} label="Species"><${Select} value=${f.species} onInput=${set('species')} options=${[['dog', 'Dog'], ['cat', 'Cat'], ['other', 'Other']]}/><//>
@@ -105,7 +106,7 @@ export function MedicineForm({ props, close }) {
         <${Field} label="Purchase price (₹)" error=${ferr(m.fieldErrors, 'purchase_price')}><${Input} type="number" value=${f.purchase_price} onInput=${set('purchase_price')}/><//>
         <${Field} label="Selling price (₹)"><${Input} type="number" value=${f.selling_price} onInput=${set('selling_price')}/><//>
       </div>
-      <${Field} label="Supplier"><${Select} value=${f.supplier_id} onInput=${set('supplier_id')} options=${supOpts}/><//>
+      <${Field} label="Supplier"><${Select} value=${f.supplier_id} onInput=${set('supplier_id')} options=${supOpts} loading=${suppliers.loading && !suppliers.data}/><//>
       <button type="submit" style="display:none"></button>
     </form>
   <//>`;
@@ -119,10 +120,11 @@ export function AppointmentForm({ props, close }) {
   const m = useMutation('appointments.create', { successMsg: 'Appointment booked', onSuccess: () => { refreshAll(); close(); } });
   const submit = (e) => { e.preventDefault(); m.run({ ...f, scheduled_at: new Date(f.scheduled_at).toISOString() }).catch(() => {}); };
   const petOpts = [['', '— Select pet —'], ...asList(pets.data).map(p => [p.id, `${p.name} · ${p.owner || ''}`])];
+  const refLoading = !props.pet_id && pets.loading && !pets.data;
   return html`<${Modal} title="Book appointment" onClose=${close}
-    footer=${html`<button class="btn gho" onClick=${close}>Cancel</button><${SaveButton} busy=${m.busy} label="Book" icon="cal" onClick=${submit}/>`}>
+    footer=${html`<button class="btn gho" onClick=${close}>Cancel</button><${SaveButton} busy=${m.busy} disabled=${refLoading} label="Book" icon="cal" onClick=${submit}/>`}>
     <form onSubmit=${submit}>
-      ${!props.pet_id && html`<${Field} label="Pet" error=${ferr(m.fieldErrors, 'pet_id') && 'Choose a pet.'}><${Select} value=${f.pet_id} onInput=${set('pet_id')} options=${petOpts}/><//>`}
+      ${!props.pet_id && html`<${Field} label="Pet" error=${(ferr(m.fieldErrors, 'pet_id') && 'Choose a pet.') || (pets.error && !pets.data && 'Couldn’t load pets — retry.')}><${Select} value=${f.pet_id} onInput=${set('pet_id')} options=${petOpts} loading=${refLoading}/><//>`}
       <${Field} label="Type"><${Seg} value=${f.type} onInput=${set('type')} options=${[['OPD', 'OPD'], ['Surgery', 'Surgery'], ['Grooming', 'Grooming']]}/><//>
       <${Field} label="Date & time"><${Input} type="datetime-local" value=${f.scheduled_at} onInput=${set('scheduled_at')}/><//>
       <${Field} label="Reason"><${Textarea} value=${f.reason} onInput=${set('reason')} placeholder="Presenting complaint / purpose"/><//>
@@ -142,11 +144,13 @@ export function VaccinationForm({ props, close }) {
   const submit = (e) => { e.preventDefault(); m.run(f).catch(() => {}); };
   const petOpts = [['', '— Select pet —'], ...asList(pets.data).map(p => [p.id, `${p.name} · ${p.owner || ''}`])];
   const vtOpts = [['', '— Vaccine —'], ...asList(vtypes.data).map(v => [v.id, v.name])];
+  const petLoading = !props.pet_id && pets.loading && !pets.data;
+  const vtLoading = vtypes.loading && !vtypes.data;
   return html`<${Modal} title="Record vaccination" onClose=${close}
-    footer=${html`<button class="btn gho" onClick=${close}>Cancel</button><${SaveButton} busy=${m.busy} label="Record" icon="syringe" onClick=${submit}/>`}>
+    footer=${html`<button class="btn gho" onClick=${close}>Cancel</button><${SaveButton} busy=${m.busy} disabled=${petLoading || vtLoading} label="Record" icon="syringe" onClick=${submit}/>`}>
     <form onSubmit=${submit}>
-      ${!props.pet_id && html`<${Field} label="Pet" error=${ferr(m.fieldErrors, 'pet_id') && 'Choose a pet.'}><${Select} value=${f.pet_id} onInput=${set('pet_id')} options=${petOpts}/><//>`}
-      <${Field} label="Vaccine" error=${ferr(m.fieldErrors, 'vaccine_type_id') && 'Choose a vaccine.'}><${Select} value=${f.vaccine_type_id} onInput=${set('vaccine_type_id')} options=${vtOpts}/><//>
+      ${!props.pet_id && html`<${Field} label="Pet" error=${ferr(m.fieldErrors, 'pet_id') && 'Choose a pet.'}><${Select} value=${f.pet_id} onInput=${set('pet_id')} options=${petOpts} loading=${petLoading}/><//>`}
+      <${Field} label="Vaccine" error=${ferr(m.fieldErrors, 'vaccine_type_id') && 'Choose a vaccine.'}><${Select} value=${f.vaccine_type_id} onInput=${set('vaccine_type_id')} options=${vtOpts} loading=${vtLoading}/><//>
       <div class="formgrid">
         <${Field} label="Date administered"><${Input} type="date" value=${f.date_administered} onInput=${set('date_administered')}/><//>
         <${Field} label="Batch (optional)"><${Input} value=${f.batch_number} onInput=${set('batch_number')}/><//>
@@ -165,10 +169,11 @@ export function DewormingForm({ props, close }) {
   const m = useMutation('dewormings.create', { successMsg: 'Deworming recorded', onSuccess: () => { refreshAll(); close(); } });
   const submit = (e) => { e.preventDefault(); m.run(f).catch(() => {}); };
   const petOpts = [['', '— Select pet —'], ...asList(pets.data).map(p => [p.id, `${p.name} · ${p.owner || ''}`])];
+  const petLoading = !props.pet_id && pets.loading && !pets.data;
   return html`<${Modal} title="Record deworming" onClose=${close}
-    footer=${html`<button class="btn gho" onClick=${close}>Cancel</button><${SaveButton} busy=${m.busy} label="Record" icon="drop" onClick=${submit}/>`}>
+    footer=${html`<button class="btn gho" onClick=${close}>Cancel</button><${SaveButton} busy=${m.busy} disabled=${petLoading} label="Record" icon="drop" onClick=${submit}/>`}>
     <form onSubmit=${submit}>
-      ${!props.pet_id && html`<${Field} label="Pet"><${Select} value=${f.pet_id} onInput=${set('pet_id')} options=${petOpts}/><//>`}
+      ${!props.pet_id && html`<${Field} label="Pet"><${Select} value=${f.pet_id} onInput=${set('pet_id')} options=${petOpts} loading=${petLoading}/><//>`}
       <div class="formgrid">
         <${Field} label="Date administered"><${Input} type="date" value=${f.date_administered} onInput=${set('date_administered')}/><//>
         <${Field} label="Product (optional)"><${Input} value=${f.product} onInput=${set('product')}/><//>
@@ -217,19 +222,31 @@ export function UserForm({ props, close }) {
 }
 
 /* ---------- Document upload (base64 → Drive) ---------- */
+const MAX_UPLOAD_MB = 10;
+const fmtSize = (b) => b < 1024 * 1024 ? (b / 1024).toFixed(0) + ' KB' : (b / 1024 / 1024).toFixed(1) + ' MB';
 export function DocumentForm({ props, close }) {
   const [f, setF] = useState({ doc_type: 'Lab Report', title: '', file: null });
   const set = (k) => (v) => setF(s => ({ ...s, [k]: v }));
   const m = useMutation('documents.upload', { successMsg: 'Document uploaded', onSuccess: () => { refreshAll(); close(); } });
-  function onFile(e) { const file = e.target.files[0]; if (!file) return; const r = new FileReader(); r.onload = () => set('file')({ name: file.name, mime: file.type, b64: String(r.result).split(',')[1] }); r.readAsDataURL(file); if (!f.title) set('title')(file.name); }
+  function onFile(e) {
+    const file = e.target.files[0]; if (!file) return;
+    if (file.size > MAX_UPLOAD_MB * 1024 * 1024) { // F10: reject upfront, not after a 30s round trip
+      toast(`That file is ${fmtSize(file.size)} — the limit is ${MAX_UPLOAD_MB} MB. Compress or split it first.`, 'err');
+      e.target.value = ''; return;
+    }
+    const r = new FileReader();
+    r.onload = () => set('file')({ name: file.name, mime: file.type, b64: String(r.result).split(',')[1], size: file.size });
+    r.readAsDataURL(file); if (!f.title) set('title')(file.name);
+  }
   function submit(e) { e.preventDefault(); if (!f.file) return toast('Choose a file first', 'err'); m.run({ pet_id: props.pet_id, consultation_id: props.consultation_id || '', doc_type: f.doc_type, title: f.title, file_name: f.file.name, mime_type: f.file.mime, file_base64: f.file.b64 }).catch(() => {}); }
   return html`<${Modal} title="Upload document" onClose=${close}
-    footer=${html`<button class="btn gho" onClick=${close}>Cancel</button><${SaveButton} busy=${m.busy} label="Upload" icon="file" onClick=${submit}/>`}>
+    footer=${html`<button class="btn gho" onClick=${close} disabled=${m.busy}>Cancel</button><${SaveButton} busy=${m.busy} disabled=${!f.file} label="Upload" icon="file" onClick=${submit}/>`}>
     <form onSubmit=${submit}>
       <${Field} label="Type"><${Select} value=${f.doc_type} onInput=${set('doc_type')} options=${['Scanned Prescription', 'Lab Report', 'X-Ray', 'Diagnostic Report', 'Other']}/><//>
       <${Field} label="Title"><${Input} value=${f.title} onInput=${set('title')}/><//>
-      <${Field} label="File"><input class="inp" type="file" onChange=${onFile} accept="image/*,.pdf"/><//>
-      ${f.file && html`<div class="alsub">${f.file.name}</div>`}
+      <${Field} label="File" hint=${`Images or PDF, up to ${MAX_UPLOAD_MB} MB`}><input class="inp" type="file" onChange=${onFile} accept="image/*,.pdf" disabled=${m.busy}/><//>
+      ${f.file && !m.busy && html`<div class="alsub">${f.file.name} · ${fmtSize(f.file.size)}</div>`}
+      ${m.busy && html`<${FauxProgress} messages=${['Uploading ' + (f.file ? fmtSize(f.file.size) : 'file'), 'Still uploading', 'Large files take longer over the link — keep this open']}/>`}
       <button type="submit" style="display:none"></button>
     </form>
   <//>`;

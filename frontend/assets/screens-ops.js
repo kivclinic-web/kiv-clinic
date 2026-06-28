@@ -2,7 +2,7 @@
 import {
   html, useState, useEffect, api, asList, isAdmin, go, Icon, toast, humanError, refreshAll, useEvent,
   useApi, useMutation, Modal, ConfirmDialog, EmptyState, ErrorState, Loading, SkeletonRows, SkeletonKpis, Spinner,
-  initials, colorFor, fmtDate, inr, openForm, Field, Input, SaveButton
+  FreshnessLabel, initials, colorFor, fmtDate, inr, openForm, Field, Input, SaveButton
 } from './core.js';
 
 function useLiveApi(action, payload, deps = []) { const r = useApi(action, payload, deps); useEvent('kiv-refresh', () => r.reload(), deps); return r; }
@@ -13,7 +13,7 @@ export function Inventory() {
   const [tab, setTab] = useState('medicines');
   const value = useLiveApi('medicines.inventoryValue', {}, []);
   return html`<section data-screen-label="Inventory">
-    <div class="hdr"><div><div class="h-ey">Stock · ${value.data ? inr(value.data.inventory_value) : '—'} total value</div><div class="h-ttl">Inventory</div></div>
+    <div class="hdr"><div><div class="h-ey">Stock · ${value.data ? inr(value.data.inventory_value) : '—'} total value <${FreshnessLabel} at=${value.fetchedAt} stale=${value.stale} error=${value.refreshError}/></div><div class="h-ttl">Inventory</div></div>
       <button class="btn pri" onClick=${() => openForm(tab === 'suppliers' ? 'supplier' : 'medicine')}><span class="nico">${Icon('plus')}</span>${tab === 'suppliers' ? 'Add supplier' : 'Add medicine'}</button></div>
     <div class="subtabs">${INV_TABS.map(([id, l]) => html`<button class="subtab ${tab === id ? 'on' : ''}" onClick=${() => setTab(id)}>${l}</button>`)}</div>
     ${tab === 'suppliers' ? html`<${Suppliers}/>` : html`<${MedTable} mode=${tab}/>`}

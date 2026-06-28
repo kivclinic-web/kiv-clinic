@@ -1,6 +1,6 @@
 // screens-clinical.js — Consultation composer (atomic FEFO), Appointments, Vaccinations/Deworming.
 import {
-  html, useState, useEffect, api, asList, isAdmin, go, Icon, toast, humanError, refreshAll, useEvent,
+  html, useState, useEffect, api, asList, isAdmin, go, Icon, toast, humanError, refreshAll, invalidateApi, useEvent,
   useApi, useMutation, Modal, ConfirmDialog, EmptyState, ErrorState, Loading, SkeletonRows, Spinner,
   initials, colorFor, fmtDate, fmtTime, inr, ageText, openForm, Field, Input, Textarea, Seg, Select, SaveButton,
   TYPE_CLS, TYPE_LABEL, BAR, APPT_STAT
@@ -32,6 +32,8 @@ export function Consultation({ petId }) {
   const overStock = rx.some(l => l.medicine_id && Number(l.quantity) > availOf(l.medicine_id));
 
   const pet = asList(pets.data).find(p => p.id === pid);
+  const petLoading = !petId && pets.loading && !pets.data; // F7: don't show an empty pet menu mid-load
+  const medsLoading = medsApi.loading && !medsApi.data;
 
   async function save(e) {
     e && e.preventDefault();
@@ -41,8 +43,14 @@ export function Consultation({ petId }) {
     try {
       const meds = rx.filter(l => l.medicine_id && Number(l.quantity) > 0).map(l => ({ medicine_id: l.medicine_id, quantity: Number(l.quantity), dosage: l.dosage }));
       await api('consultations.create', { pet_id: pid, diagnosis: f.diagnosis, treatment: f.treatment, clinical_notes: f.clinical_notes, follow_up_interval: f.follow_up_interval || undefined, medicines: meds }, { mutating: true });
-      if (f.weight) { try { await api('petWeights.add', { pet_id: pid, weight_kg: f.weight }, { mutating: true }); } catch {} }
+      let weightFailed = false;
+      if (f.weight) { try { await api('petWeights.add', { pet_id: pid, weight_kg: f.weight }, { mutating: true }); } catch { weightFailed = true; } }
       toast('Consultation saved' + (meds.length ? ' · stock updated' : ''), 'ok');
+      // F9: never swallow the weight failure — tell the user it didn't persist (sticky error toast).
+      if (weightFailed) toast('Consultation saved, but the weight couldn’t be recorded — add it again from the pet record.', 'err');
+      // F9: drop the pet-record cache so the timeline opens fresh WITH this consultation, not stale without it.
+      invalidateApi('pets.get', { id: pid });
+      invalidateApi('consultations.byPet', { pet_id: pid, all: true });
       refreshAll();
       go('pet/' + pid);
     } catch (err) { toast(humanError(err), 'err'); setBusy(false); }
@@ -52,11 +60,11 @@ export function Consultation({ petId }) {
   return html`<section data-screen-label="Consultation">
     <div class="hdr"><div><div class="h-ey">New record</div><div class="h-ttl">Consultation</div></div>
       <div style="display:flex;gap:10px"><button class="btn gho" onClick=${() => history.back()}>Cancel</button>
-        <button class="btn pri" disabled=${busy || overStock} onClick=${save}>${busy ? html`${Spinner(16)} Saving…` : html`${Icon('check', 17)}Save & prescribe`}</button></div></div>
+        <button class="btn pri" disabled=${busy || overStock || petLoading} onClick=${save}>${busy ? html`${Spinner(16)} Saving…` : html`${Icon('check', 17)}Save & prescribe`}</button></div></div>
     <div class="dgrid">
       <div class="card pad">
         ${pet ? html`<div style="display:flex;gap:12px;align-items:center;padding-bottom:16px;margin-bottom:16px;border-bottom:1px solid var(--line)"><span class="petav" style="background:${colorFor(pet.id)};width:48px;height:48px;border-radius:14px;font-size:18px">${initials(pet.name)}</span><div><div style="font-weight:700;font-size:17px">${pet.name}</div><div class="alsub">${pet.breed} · ${ageText(pet.age_months)} · ${pet.owner || ''}</div></div></div>`
-          : html`<${Field} label="Pet"><${Select} value=${pid} onInput=${setPid} options=${petOpts}/><//>`}
+          : html`<${Field} label="Pet"><${Select} value=${pid} onInput=${setPid} options=${petOpts} loading=${petLoading}/><//>`}
         <${Field} label="Diagnosis"><${Input} value=${f.diagnosis} onInput=${set('diagnosis')} placeholder="Primary diagnosis"/><//>
         <${Field} label="Treatment"><${Textarea} value=${f.treatment} onInput=${set('treatment')} placeholder="Plan, dosage, advice…"/><//>
         <${Field} label="Clinical notes"><${Textarea} value=${f.clinical_notes} onInput=${set('clinical_notes')} placeholder="Observations, vitals…"/><//>
@@ -72,9 +80,9 @@ export function Consultation({ petId }) {
           ${rx.length === 0 && html`<div class="alsub" style="margin-bottom:10px">No medicines added.</div>`}
           ${rx.map((l, i) => { const avail = availOf(l.medicine_id); const over = l.medicine_id && Number(l.quantity) > avail; const pct = avail ? Math.min(100, (Number(l.quantity) / avail) * 100) : 0; return html`
             <div style="border:1px solid ${over ? 'var(--red)' : 'var(--line)'};border-radius:13px;padding:12px;margin-bottom:10px">
-              <div style="display:flex;gap:8px;margin-bottom:8px"><div style="flex:1"><${Select} value=${l.medicine_id} onInput=${v => setRxLine(i, 'medicine_id', v)} options=${medOpts}/></div>
-                <input class="inp" type="number" style="width:74px" value=${l.quantity} onInput=${e => setRxLine(i, 'quantity', e.target.value)}/>
-                <button class="iconbtn" onClick=${() => rmRx(i)}>${Icon('x', 16)}</button></div>
+              <div style="display:flex;gap:8px;margin-bottom:8px"><div style="flex:1"><${Select} value=${l.medicine_id} onInput=${v => setRxLine(i, 'medicine_id', v)} options=${medOpts} loading=${medsLoading}/></div>
+                <input class="inp" type="number" min="1" style="width:74px" value=${l.quantity} onInput=${e => setRxLine(i, 'quantity', e.target.value)}/>
+                <button class="iconbtn" aria-label="Remove medicine" onClick=${() => rmRx(i)}>${Icon('x', 16)}</button></div>
               <input class="inp" placeholder="Dosage / instructions" value=${l.dosage} onInput=${e => setRxLine(i, 'dosage', e.target.value)}/>
               ${l.medicine_id && html`<div class="alsub" style="margin-top:6px">${over ? html`<span style="color:var(--red);font-weight:700">Only ${avail} in stock</span>` : `${l.quantity} of ${avail} in stock`}</div><div class="stockbar"><i style="width:${pct}%;background:${over ? 'var(--red)' : 'var(--teal)'}"></i></div>`}
             </div>`; })}
@@ -93,16 +101,19 @@ export function Consultation({ petId }) {
 export function Appointments() {
   const [archived, setArchived] = useState(false);
   const [type, setType] = useState('All');
+  const [day, setDay] = useState(null); // selected yyyy-mm-dd, or null for all days
   const list = useLiveApi('appointments.list', { archived, limit: 200 }, [archived]);
   const [actions, setActions] = useState(null);
   const days = lastSevenDays();
   let rows = asList(list.data);
   if (type !== 'All') rows = rows.filter(a => type === 'Follow-up' ? a.type === 'FollowUp' : a.type === type);
+  if (day) rows = rows.filter(a => localISODate(a.scheduled_at) === day); // F8: day strip now actually filters
 
   return html`<section data-screen-label="Appointments">
     <div class="hdr"><div><div class="h-ey">Schedule · ${archived ? 'archived' : 'last 7 days active'}</div><div class="h-ttl">Appointments</div></div>
       <button class="btn pri" onClick=${() => openForm('appointment')}><span class="nico">${Icon('plus')}</span>Book appointment</button></div>
-    <div style="display:flex;gap:8px;margin-bottom:18px;overflow:auto">${days.map(d => html`<div class="kpi" style="min-width:78px;align-items:center;text-align:center;gap:2px;${d.today ? 'border-color:var(--teal)' : ''}"><span class="alsub" style="font-weight:700">${d.day}</span><span class="kpinum" style="font-size:22px">${d.date}</span></div>`)}</div>
+    <div style="display:flex;gap:8px;margin-bottom:18px;overflow:auto">${days.map(d => html`<button class="kpi daytile ${day === d.iso ? 'on' : ''}" aria-pressed=${day === d.iso} style="min-width:78px;align-items:center;text-align:center;gap:2px;${d.today && day !== d.iso ? 'border-color:var(--teal)' : ''}" onClick=${() => setDay(day === d.iso ? null : d.iso)}><span class="alsub" style="font-weight:700">${d.day}</span><span class="kpinum" style="font-size:22px">${d.date}</span></button>`)}</div>
+    ${day && html`<div class="alsub" style="margin:-8px 0 14px;display:flex;align-items:center;gap:8px">Showing ${fmtDate(day)} <button class="lnk" onClick=${() => setDay(null)}>Clear</button></div>`}
     <div class="evtfilters" style="justify-content:space-between"><div style="display:flex;gap:8px;flex-wrap:wrap">${['All', 'OPD', 'Surgery', 'Grooming', 'Follow-up'].map(t => html`<button class="pill ${type === t ? 'on' : ''}" onClick=${() => setType(t)}>${t}</button>`)}</div>
       <button class="pill ${archived ? 'on' : ''}" onClick=${() => setArchived(a => !a)}>${Icon('clock', 15)} ${archived ? 'Showing archived' : 'Show archived'}</button></div>
     <div class="card pad">
@@ -111,7 +122,7 @@ export function Appointments() {
         html`<div class="tl">${rows.map(a => { const [time, ap] = fmtTime(a.scheduled_at); const [sc, sl] = APPT_STAT[a.status] || ['wait', a.status]; return html`
           <div class="tlrow"><div class="tltime">${time}<small>${ap}</small></div><div class="tlbar" style="background:${BAR[a.type] || 'var(--line)'}"></div>
             <div class="tlbody"><div class="tlpet"><span class="peta" style="background:${colorFor(a.pet_id)}">${initials(a.pet_name || 'P')}</span>${a.pet_name || 'Pet'}<span class="tag ${TYPE_CLS[a.type] || 'opd'}">${TYPE_LABEL(a.type)}</span></div><div class="tlmeta">${a.reason || '—'}${a.client_name ? ' · ' + a.client_name : ''} · ${fmtDate(a.scheduled_at)}</div></div>
-            <div class="row-actions"><span class="stat ${sc}">${sl}</span><button class="iconbtn" onClick=${() => setActions(a)}>${Icon('chevron')}</button></div></div>`; })}</div>`}
+            <div class="row-actions"><span class="stat ${sc}">${sl}</span><button class="iconbtn" aria-label="Appointment actions" onClick=${() => setActions(a)}>${Icon('chevron')}</button></div></div>`; })}</div>`}
     </div>
     ${actions && html`<${ApptActions} appt=${actions} close=${() => setActions(null)}/>`}
   </section>`;
@@ -120,6 +131,7 @@ export function Appointments() {
 function ApptActions({ appt, close }) {
   const [when, setWhen] = useState(toLocal(appt.scheduled_at));
   const [busy, setBusy] = useState('');
+  const [confirmCancel, setConfirmCancel] = useState(false);
   async function run(kind) {
     setBusy(kind);
     try {
@@ -131,11 +143,12 @@ function ApptActions({ appt, close }) {
     } catch (e) { toast(humanError(e), 'err'); setBusy(''); }
   }
   return html`<${Modal} title=${`${appt.pet_name} · ${TYPE_LABEL(appt.type)}`} onClose=${close}
-    footer=${html`<button class="btn gho" style="margin-right:auto;color:var(--red)" disabled=${busy} onClick=${() => run('cancel')}>${busy === 'cancel' ? Spinner(16) : 'Cancel visit'}</button>
+    footer=${html`<button class="btn gho" style="margin-right:auto;color:var(--red)" disabled=${busy} onClick=${() => setConfirmCancel(true)}>${busy === 'cancel' ? Spinner(16) : 'Cancel visit'}</button>
       <button class="btn gho" disabled=${busy} onClick=${() => run('complete')}>${busy === 'complete' ? Spinner(16) : 'Mark completed'}</button>
       <button class="btn pri" disabled=${busy} onClick=${() => run('reschedule')}>${busy === 'reschedule' ? html`${Spinner(16)} Saving…` : 'Reschedule'}</button>`}>
     <div class="alsub" style="margin-bottom:12px">${appt.reason || '—'}</div>
     <${Field} label="New date & time"><${Input} type="datetime-local" value=${when} onInput=${setWhen}/><//>
+    ${confirmCancel && html`<${ConfirmDialog} title="Cancel this visit?" danger=${true} confirmLabel="Cancel visit" body=${`Cancel ${appt.pet_name}'s ${TYPE_LABEL(appt.type)} appointment? This can't be undone from here.`} onConfirm=${() => run('cancel')} onClose=${() => setConfirmCancel(false)}/>`}
   <//>`;
 }
 const toLocal = (iso) => { const d = new Date(iso); const off = d.getTimezoneOffset(); return new Date(d.getTime() - off * 60000).toISOString().slice(0, 16); };
@@ -173,4 +186,5 @@ export function Vaccinations() {
     </div>
   </section>`;
 }
-function lastSevenDays() { const out = []; const t = new Date(); for (let i = 6; i >= 0; i--) { const d = new Date(t); d.setDate(t.getDate() - i); out.push({ day: d.toLocaleDateString('en-IN', { weekday: 'short' }), date: d.getDate(), today: i === 0 }); } return out; }
+const localISODate = (v) => { const x = new Date(v); return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`; };
+function lastSevenDays() { const out = []; const t = new Date(); for (let i = 6; i >= 0; i--) { const d = new Date(t); d.setDate(t.getDate() - i); out.push({ day: d.toLocaleDateString('en-IN', { weekday: 'short' }), date: d.getDate(), iso: localISODate(d), today: i === 0 }); } return out; }
