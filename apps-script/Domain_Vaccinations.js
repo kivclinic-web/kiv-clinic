@@ -70,7 +70,7 @@ function vaccinationsOverdueList_(req) { return vaccinationStatusList_(req, true
 
 function vaccineTypesList_(req) {
   requireAuth_(req);
-  return ok_(readAll_('vaccine_types').filter(function (v) { return v_bool_(v.is_active) !== false; }));
+  return ok_(readCachedTable_('vaccine_types', 1800).filter(function (v) { return v_bool_(v.is_active) !== false; }));
 }
 
 function publicVaccination_(v) {

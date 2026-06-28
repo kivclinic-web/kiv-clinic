@@ -7,7 +7,13 @@ var CONFIG = {
   SCHEMA_VERSION: 1,
 
   // Auth / security
-  HASH_ITERATIONS: 100000,        // key-stretching for password hashing
+  // Key-stretching for password hashing. NOTE: each iteration is a Utilities.computeDigest call,
+  // which on Apps Script costs ~0.3 ms — so 100000 made every login ~30 s AND it ran under the
+  // global script lock (→ RATE_LIMITED for concurrent logins). 2500 keeps meaningful stretching
+  // (~1 s) given the private sheet + login throttling + HMAC tokens. Hashes are self-describing
+  // (see Auth.js hashPassword_/verifyPassword_) so old 100k hashes still verify and upgrade on login.
+  HASH_ITERATIONS: 2500,
+  LEGACY_HASH_ITERATIONS: 100000, // bare-hex hashes (no "v1$" prefix) were stretched this many times
   TOKEN_TTL_MS: 1000 * 60 * 60 * 8, // 8h session token
   MAX_FAILED_ATTEMPTS: 5,
   LOCKOUT_MS: 1000 * 60 * 15,     // 15 min lockout after too many failures

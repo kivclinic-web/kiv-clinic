@@ -16,7 +16,29 @@ function getSpreadsheet_() {
  * same tab within a single request without any cross-request staleness. Writes invalidate the tab.
  */
 var __readCache = {};
-function invalidateRead_(tab) { delete __readCache[tab + ':live']; delete __readCache[tab + ':all']; }
+function invalidateRead_(tab) {
+  delete __readCache[tab + ':live']; delete __readCache[tab + ':all'];
+  // Drop any cross-request CacheService snapshot for this tab (P4). Cheap and keeps cached
+  // reference tables correct after a write; harmless for tabs that were never snapshotted.
+  try { CacheService.getScriptCache().remove('tbl:' + CONFIG.SCHEMA_VERSION + ':' + tab); } catch (e) {}
+}
+
+/**
+ * Read a small, low-churn reference table with a cross-request CacheService snapshot (P4) — turns
+ * repeated reads (across users/requests) into a cheap cache hit. Use ONLY for small tables
+ * (vaccine_types, suppliers, clinic_info); writes invalidate via invalidateRead_. CacheService
+ * values cap at 100 KB, so never use this for unbounded/large tabs (clients, medicines, etc.).
+ */
+function readCachedTable_(tab, ttl) {
+  if (__readCache[tab + ':live']) return readAll_(tab); // already read this request
+  var ck = 'tbl:' + CONFIG.SCHEMA_VERSION + ':' + tab;
+  var cache = CacheService.getScriptCache();
+  var hit = cache.get(ck);
+  if (hit) { try { return JSON.parse(hit); } catch (e) {} }
+  var rows = readAll_(tab);
+  try { cache.put(ck, JSON.stringify(rows), ttl || 300); } catch (e) {}
+  return rows;
+}
 
 function getSheet_(tab) {
   var sh = getSpreadsheet_().getSheetByName(tab);
@@ -75,13 +97,31 @@ function findBy_(tab, field, value) {
   return rows.filter(function (r) { return r[field] === value; });
 }
 
-/** Resolve column order for a tab from its header row (defends against manual reordering). */
+/**
+ * Resolve column order for a tab from its header row (defends against manual reordering).
+ * The header row only changes via a migration, so it's cached cross-request in CacheService keyed
+ * by schema_version (P8) — this removes the getLastColumn + getRange reads from every write after the
+ * first. A schema_version bump changes the key and invalidates it. Read-by-header is preserved: we
+ * cache the header *names*, never fixed indices.
+ */
 function headerIndex_(tab) {
   var sh = getSheet_(tab);
-  var headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  var headers = cachedHeaders_(tab, sh);
   var idx = {};
   headers.forEach(function (h, i) { idx[h] = i; });
   return { sheet: sh, headers: headers, idx: idx };
+}
+
+function cachedHeaders_(tab, sh) {
+  var ck = 'hdr:' + CONFIG.SCHEMA_VERSION + ':' + tab;
+  if (__readCache[ck]) return __readCache[ck];
+  var cache = CacheService.getScriptCache();
+  var hit = cache.get(ck);
+  if (hit) { try { var h = JSON.parse(hit); __readCache[ck] = h; return h; } catch (e) {} }
+  var headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  __readCache[ck] = headers;
+  try { cache.put(ck, JSON.stringify(headers), 21600); } catch (e) {} // 6h; schema_version keys it
+  return headers;
 }
 
 /** Insert a record. Auto-fills id + audit columns. Returns the stored object. */

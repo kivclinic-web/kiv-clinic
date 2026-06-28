@@ -104,7 +104,7 @@ function seedReferenceData_() {
   return seeded;
 }
 
-function clinicInfoRow_() { var r = readAll_('clinic_info'); return r.length ? r[0] : null; }
+function clinicInfoRow_() { var r = readCachedTable_('clinic_info', 1800); return r.length ? r[0] : null; }
 
 /** Upsert a key/value into the _meta tab (no `id` column, so handled directly). */
 function setMeta_(key, value) {

@@ -120,7 +120,7 @@ function suppliersUpdate_(req) {
 
 function suppliersList_(req) {
   requireAuth_(req);
-  var rows = readAll_('suppliers').sort(function (a, b) { return String(a.name).localeCompare(String(b.name)); });
+  var rows = readCachedTable_('suppliers', 900).slice().sort(function (a, b) { return String(a.name).localeCompare(String(b.name)); });
   return ok_(rows.map(publicSupplier_));
 }
 

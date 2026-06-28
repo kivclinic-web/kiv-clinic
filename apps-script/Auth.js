@@ -10,14 +10,34 @@ function bytesToHex_(bytes) {
   return bytes.map(function (b) { var v = (b < 0 ? b + 256 : b).toString(16); return v.length === 1 ? '0' + v : v; }).join('');
 }
 
-/** Key-stretched salted SHA-256. */
-function hashPassword_(plain, salt) {
-  var data = salt + '|' + plain;
-  var digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, data, Utilities.Charset.UTF_8);
-  for (var i = 1; i < CONFIG.HASH_ITERATIONS; i++) {
+/** Raw key-stretched salted SHA-256 for a given iteration count. */
+function hashRaw_(plain, salt, iters) {
+  var digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, salt + '|' + plain, Utilities.Charset.UTF_8);
+  for (var i = 1; i < iters; i++) {
     digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, bytesToHex_(digest) + salt);
   }
   return bytesToHex_(digest);
+}
+
+/**
+ * Produce a self-describing password hash: "v1$<iters>$<hex>". Embedding the iteration count lets
+ * us change CONFIG.HASH_ITERATIONS without invalidating already-stored hashes — verifyPassword_
+ * reads the count from the stored value, and successful logins transparently re-hash with the
+ * current count (upgrade-on-login). Legacy bare-hex values are treated as LEGACY_HASH_ITERATIONS.
+ */
+function hashPassword_(plain, salt) {
+  return 'v1$' + CONFIG.HASH_ITERATIONS + '$' + hashRaw_(plain, salt, CONFIG.HASH_ITERATIONS);
+}
+
+/** Verify a plaintext against a stored hash. Returns { ok, iters } (iters = the count actually used). */
+function verifyPassword_(plain, salt, stored) {
+  stored = String(stored);
+  if (stored.indexOf('v1$') === 0) {
+    var p = stored.split('$');
+    var iters = Number(p[1]) || CONFIG.LEGACY_HASH_ITERATIONS;
+    return { ok: safeEqual_(hashRaw_(plain, salt, iters), p[2] || ''), iters: iters };
+  }
+  return { ok: safeEqual_(hashRaw_(plain, salt, CONFIG.LEGACY_HASH_ITERATIONS), stored), iters: CONFIG.LEGACY_HASH_ITERATIONS };
 }
 
 /** Constant-time-ish string compare. */
@@ -111,32 +131,36 @@ function login_(req) {
   var password = req.payload.password;
   if (!identifier || !password) throw new ApiError(ERROR_CODES.VALIDATION_ERROR, 'identifier and password required');
 
-  return withLock_(function () {
-    var users = findBy_('auth_users', 'identifier', identifier);
-    var user = users[0];
-    // Uniform failure to avoid user enumeration.
-    if (!user) throw new ApiError(ERROR_CODES.AUTH_INVALID, 'Invalid credentials');
-    if (user.status === 'disabled') throw new ApiError(ERROR_CODES.FORBIDDEN, 'Account disabled');
-    if (user.locked_until && new Date(user.locked_until).getTime() > new Date().getTime()) {
-      throw new ApiError(ERROR_CODES.AUTH_LOCKED, 'Account temporarily locked. Try later.');
+  // Read + verify WITHOUT the global script lock — the password hash is deliberately expensive, and
+  // holding the one app-wide lock across it serializes all logins/writes (the old cause of the
+  // RATE_LIMITED timeout). The lock is taken only for the short throttle/last-login row update below.
+  var users = findBy_('auth_users', 'identifier', identifier);
+  var user = users[0];
+  // Uniform failure to avoid user enumeration.
+  if (!user) throw new ApiError(ERROR_CODES.AUTH_INVALID, 'Invalid credentials');
+  if (user.status === 'disabled') throw new ApiError(ERROR_CODES.FORBIDDEN, 'Account disabled');
+  if (user.locked_until && new Date(user.locked_until).getTime() > new Date().getTime()) {
+    throw new ApiError(ERROR_CODES.AUTH_LOCKED, 'Account temporarily locked. Try later.');
+  }
+  var v = verifyPassword_(password, user.password_salt, user.password_hash);
+  if (!v.ok) {
+    var attempts = Number(user.failed_attempts || 0) + 1;
+    var fpatch = { failed_attempts: attempts };
+    if (attempts >= CONFIG.MAX_FAILED_ATTEMPTS) {
+      fpatch.locked_until = new Date(new Date().getTime() + CONFIG.LOCKOUT_MS).toISOString();
+      fpatch.failed_attempts = 0;
     }
-    var computed = hashPassword_(password, user.password_salt);
-    if (!safeEqual_(computed, String(user.password_hash))) {
-      var attempts = Number(user.failed_attempts || 0) + 1;
-      var patch = { failed_attempts: attempts };
-      if (attempts >= CONFIG.MAX_FAILED_ATTEMPTS) {
-        patch.locked_until = new Date(new Date().getTime() + CONFIG.LOCKOUT_MS).toISOString();
-        patch.failed_attempts = 0;
-      }
-      update_('auth_users', user.id, patch, null);
-      writeAudit_('auth.login_failed', 'auth_users', user.id, { attempts: attempts });
-      throw new ApiError(ERROR_CODES.AUTH_INVALID, 'Invalid credentials');
-    }
-    update_('auth_users', user.id, { failed_attempts: 0, locked_until: '', last_login_at: new Date().toISOString() }, null);
-    var t = issueToken_(user);
-    writeAudit_('auth.login', 'auth_users', user.id, null, { sub: user.id, role: user.role });
-    return { token: t.token, role: user.role, display_name: user.display_name, must_reset: v_bool_(user.must_reset) };
-  });
+    withLock_(function () { update_('auth_users', user.id, fpatch, null); });
+    writeAudit_('auth.login_failed', 'auth_users', user.id, { attempts: attempts });
+    throw new ApiError(ERROR_CODES.AUTH_INVALID, 'Invalid credentials');
+  }
+  var patch = { failed_attempts: 0, locked_until: '', last_login_at: new Date().toISOString() };
+  // Upgrade-on-login: re-hash with the current iteration count if the stored hash used a different one.
+  if (v.iters !== CONFIG.HASH_ITERATIONS) patch.password_hash = hashPassword_(password, user.password_salt);
+  withLock_(function () { update_('auth_users', user.id, patch, null); });
+  var t = issueToken_(user);
+  writeAudit_('auth.login', 'auth_users', user.id, null, { sub: user.id, role: user.role });
+  return { token: t.token, role: user.role, display_name: user.display_name, must_reset: v_bool_(user.must_reset) };
 }
 
 function logout_(req) {
@@ -153,7 +177,7 @@ function changePassword_(req) {
   var actor = requireAuth_(req);
   var user = findById_('auth_users', actor.sub);
   if (!user) throw new ApiError(ERROR_CODES.NOT_FOUND, 'User not found');
-  if (!safeEqual_(hashPassword_(req.payload.old, user.password_salt), String(user.password_hash))) {
+  if (!verifyPassword_(req.payload.old, user.password_salt, user.password_hash).ok) {
     throw new ApiError(ERROR_CODES.AUTH_INVALID, 'Current password incorrect');
   }
   var newPlain = v_string_(req.payload.new);
