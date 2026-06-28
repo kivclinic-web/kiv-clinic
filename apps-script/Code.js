@@ -73,6 +73,7 @@ var ROUTES = {
   'documents.delete':         { fn: deleteDocument_,          mutating: true },
   'storage.usage':            { fn: storageUsage_,            mutating: false },
   // dashboard / reports / reminders / settings
+  'dashboard.summary': { fn: dashboardSummary_, mutating: false },
   'dashboard.kpis':    { fn: dashboardKpis_,    mutating: false },
   'dashboard.widgets': { fn: dashboardWidgets_, mutating: false },
   'reports.daily':     { fn: reportsDaily_,     mutating: false },

@@ -45,14 +45,21 @@ var CONFIG = {
   }
 };
 
-/** Read a Script Property (throws if a required one is missing). */
+/**
+ * Read a Script Property (throws if a required one is missing).
+ * Memoized per execution (P6) — properties are stable within a request, so repeated reads of
+ * SPREADSHEET_ID / TOKEN_SECRET etc. avoid extra PropertiesService round trips.
+ */
+var __propCache = {};
 function prop_(key, required) {
-  var v = PropertiesService.getScriptProperties().getProperty(key);
+  var v = (key in __propCache) ? __propCache[key]
+    : (__propCache[key] = PropertiesService.getScriptProperties().getProperty(key));
   if (required && !v) throw new ApiError('INTERNAL', 'Missing script property: ' + key);
   return v;
 }
 
-/** Set a Script Property. */
+/** Set a Script Property (keeps the per-execution cache consistent). */
 function setProp_(key, value) {
   PropertiesService.getScriptProperties().setProperty(key, value);
+  __propCache[key] = value;
 }

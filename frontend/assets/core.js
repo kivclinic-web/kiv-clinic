@@ -56,10 +56,41 @@ export const SkeletonRows = (n = 4) => html`<div>${Array.from({ length: n }).map
 export function ErrorState({ error, onRetry }) { return html`<div class="errbox">${Icon('warn', 20)}<span style="flex:1">${humanError(error)}</span>${onRetry && html`<button class="btn gho" onClick=${onRetry}>Retry</button>`}</div>`; }
 export function EmptyState({ icon = 'paw', title, sub, action }) { return html`<div class="empty"><div style="display:flex;justify-content:center;margin-bottom:10px">${Icon(icon, 30)}</div><div style="font-weight:700;color:var(--soft);font-size:15px">${title}</div>${sub && html`<div class="alsub" style="margin-top:4px">${sub}</div>`}${action && html`<div style="margin-top:14px">${action}</div>`}</div>`; }
 
-/** Fetch-on-mount hook → { data, loading, error, reload }. */
+/**
+ * Stale-while-revalidate fetch hook → { data, loading, error, stale, reload }.
+ * On mount it paints the last-known payload INSTANTLY from cache (memory + localStorage), then
+ * revalidates in the background. Skeletons (`loading`) only show on a genuine first-ever load.
+ * `stale` is true while a background refresh of already-shown data is in flight (for a subtle hint).
+ * A failed background revalidation keeps the cached data on screen rather than blanking it.
+ */
+const _apiCache = new Map();
+const SWR_PREFIX = 'kiv_swr_';
+function swrKey(action, payload) { return action + ':' + JSON.stringify(payload || {}); }
+function swrRead(key) {
+  if (_apiCache.has(key)) return _apiCache.get(key);
+  try { const raw = localStorage.getItem(SWR_PREFIX + key); if (raw != null) { const v = JSON.parse(raw); _apiCache.set(key, v); return v; } } catch {}
+  return undefined;
+}
+function swrWrite(key, data) {
+  _apiCache.set(key, data);
+  try { localStorage.setItem(SWR_PREFIX + key, JSON.stringify(data)); } catch {}
+}
 export function useApi(action, payload, deps = []) {
-  const [s, setS] = useState({ data: null, loading: true, error: null });
-  const load = () => { setS(v => ({ ...v, loading: true, error: null })); api(action, payload).then(d => setS({ data: d, loading: false, error: null })).catch(e => setS({ data: null, loading: false, error: e })); };
+  const key = swrKey(action, payload);
+  const [s, setS] = useState(() => {
+    const cached = swrRead(key);
+    return cached !== undefined
+      ? { data: cached, loading: false, error: null, stale: true }
+      : { data: null, loading: true, error: null, stale: false };
+  });
+  const load = () => {
+    setS(v => v.data !== null ? { ...v, stale: true, error: null } : { data: null, loading: true, error: null, stale: false });
+    api(action, payload)
+      .then(d => { swrWrite(key, d); setS({ data: d, loading: false, error: null, stale: false }); })
+      .catch(e => setS(v => v.data !== null
+        ? { ...v, stale: false, error: null }            // keep showing good data on a transient blip
+        : { data: null, loading: false, error: e, stale: false }));
+  };
   useEffect(load, deps);
   return { ...s, reload: load };
 }

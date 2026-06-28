@@ -147,9 +147,13 @@ const KPI_DEFS = [
   ['expiring_medicines', 'Expiring soon', 'warn', 'var(--redtint)', 'var(--red)', 'inventory']
 ];
 function Dashboard() {
-  const k = useApi('dashboard.kpis', {});
-  const w = useApi('dashboard.widgets', {});
-  useEvent('kiv-refresh', () => { k.reload(); w.reload(); }, []);
+  // One request for the whole Today screen (kpis + widgets + reminders), painted instantly from
+  // SWR cache on every revisit. Compatibility shims keep the existing markup below unchanged.
+  const s = useApi('dashboard.summary', {});
+  useEvent('kiv-refresh', () => s.reload(), []);
+  const k = { loading: s.loading, error: s.error, reload: s.reload, data: s.data && s.data.kpis };
+  const w = { loading: s.loading, error: s.error, reload: s.reload, data: s.data && s.data.widgets };
+  const reminders = s.data && s.data.reminders;
   const today = new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long' });
   const greeting = (() => { const h = new Date().getHours(); return h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening'; })();
   const kpis = k.data || {};
@@ -172,7 +176,7 @@ function Dashboard() {
               <div class="row-actions"><span class="stat ${sc}">${sl}</span></div></div>`; })}</div>`}
       </div>
       <div class="stack">
-        <div class="card pad"><div class="sectttl" style="margin-bottom:14px">Needs attention</div><${AttentionList} widgets=${w}/></div>
+        <div class="card pad"><div class="sectttl" style="margin-bottom:14px">Needs attention</div><${AttentionList} widgets=${w} reminders=${reminders}/></div>
         <div class="card pad"><div class="hdr" style="margin-bottom:10px"><div class="sectttl">Vaccinations due</div><button class="lnk" onClick=${() => go('vaccinations')}>All →</button></div>
           ${w.loading ? Loading('') : (w.data?.vaccination_due || []).length === 0 ? html`<${EmptyState} icon="syringe" title="Nothing due" sub="All up to date."/>` :
             w.data.vaccination_due.slice(0, 4).map(d => html`<button class="qarow" style="width:100%;text-align:left" onClick=${() => go('pet/' + d.pet_id)}><span class="peta" style="background:${colorFor(d.pet_id)}">${initials(d.pet_name || 'P')}</span><div style="flex:1"><div style="font-weight:700;font-size:14px">${d.pet_name} · ${d.vaccine_name}</div><div class="alsub">${d.overdue ? 'Overdue' : 'Due ' + fmtDate(d.due_date)}</div></div><span class="stat ${d.overdue ? 'cancel' : 'prog'}"></span></button>`)}
@@ -181,12 +185,11 @@ function Dashboard() {
     </div>
   </section>`;
 }
-function AttentionList({ widgets: w }) {
-  const extra = useApi('reminders.all', {});
-  if (w.loading || extra.loading) return Loading('');
+function AttentionList({ widgets: w, reminders }) {
+  if (w.loading) return Loading('');
   const items = [];
   const low = (w.data?.inventory_alerts || []), exp = (w.data?.expiry_alerts || []);
-  const ov = (extra.data?.vaccinations_overdue || []), dw = (extra.data?.dewormings_due || []);
+  const ov = (reminders?.vaccinations_overdue || []), dw = (reminders?.dewormings_due || []);
   if (ov.length) items.push({ cls: 'red', icon: 'syringe', ttl: `${ov.length} overdue vaccination${ov.length > 1 ? 's' : ''}`, sub: ov.slice(0, 2).map(v => v.pet_name).join(', '), go: () => go('vaccinations') });
   if (exp.length) items.push({ cls: 'red', icon: 'warn', ttl: `${exp.length} medicine${exp.length > 1 ? 's' : ''} expiring`, sub: exp.slice(0, 2).map(m => m.name).join(', '), go: () => go('inventory') });
   if (low.length) items.push({ cls: 'amber', icon: 'box', ttl: `${low.length} low-stock medicine${low.length > 1 ? 's' : ''}`, sub: low.slice(0, 2).map(m => m.name).join(', '), go: () => go('inventory') });

@@ -10,6 +10,14 @@ function getSpreadsheet_() {
   return __ssCache;
 }
 
+/**
+ * Request-scoped read cache (P1). Apps Script re-initializes globals per execution, so this object
+ * lives exactly one doPost — it de-dupes the many findById_/findBy_/composed-handler reads of the
+ * same tab within a single request without any cross-request staleness. Writes invalidate the tab.
+ */
+var __readCache = {};
+function invalidateRead_(tab) { delete __readCache[tab + ':live']; delete __readCache[tab + ':all']; }
+
 function getSheet_(tab) {
   var sh = getSpreadsheet_().getSheetByName(tab);
   if (!sh) throw new ApiError(ERROR_CODES.INTERNAL, 'Missing tab: ' + tab);
@@ -31,12 +39,18 @@ function withLock_(fn) {
   try { return fn(); } finally { lock.releaseLock(); }
 }
 
-/** Read an entire tab into an array of row objects: { _row: <sheetRowNumber>, ...columns }. */
+/**
+ * Read an entire tab into an array of row objects: { _row: <sheetRowNumber>, ...columns }.
+ * Memoized per execution (P1). Returns a shallow array copy so callers may sort/filter freely
+ * without mutating the cached array; row objects are shared (reads are safe, writes invalidate).
+ */
 function readAll_(tab, opts) {
   opts = opts || {};
+  var key = tab + (opts.includeDeleted ? ':all' : ':live');
+  if (__readCache[key]) return __readCache[key].slice();
   var sh = getSheet_(tab);
   var range = sh.getDataRange().getValues();
-  if (range.length < 2) return [];
+  if (range.length < 2) { __readCache[key] = []; return []; }
   var headers = range[0];
   var rows = [];
   for (var r = 1; r < range.length; r++) {
@@ -45,7 +59,8 @@ function readAll_(tab, opts) {
     if (!opts.includeDeleted && schemaOf_(tab).softDelete !== false && obj.is_deleted === true) continue;
     rows.push(obj);
   }
-  return rows;
+  __readCache[key] = rows;
+  return rows.slice();
 }
 
 /** Find one non-deleted row by id (or null). */
@@ -87,6 +102,7 @@ function insert_(tab, data, actor) {
   }
   var rowArr = hi.headers.map(function (h) { return serializeCell_(rec[h]); });
   hi.sheet.appendRow(rowArr);
+  invalidateRead_(tab);
   return rec;
 }
 
@@ -105,6 +121,7 @@ function update_(tab, id, patch, actor) {
   }
   var rowArr = hi.headers.map(function (h) { return serializeCell_(existing[h]); });
   hi.sheet.getRange(existing._row, 1, 1, hi.headers.length).setValues([rowArr]);
+  invalidateRead_(tab);
   return existing;
 }
 

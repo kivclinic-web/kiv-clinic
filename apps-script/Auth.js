@@ -73,9 +73,25 @@ function verifyToken_(token) {
   return claims;
 }
 
+// Revocation set is cached cross-request in CacheService (P5) so the hot auth path does a cheap
+// cache get instead of a full revoked_tokens sheet read on EVERY authenticated request. The sheet
+// stays the durable source of truth; on a cache miss (cold start / TTL expiry) we rebuild from it,
+// and logout_ invalidates the key so a freshly revoked jti is reflected immediately.
+var REVOKED_CACHE_KEY = 'revoked_set';
+var REVOKED_CACHE_TTL = 600; // seconds; backstop — the sheet is authoritative
+
+function revokedSet_() {
+  var cache = CacheService.getScriptCache();
+  var cached = cache.get(REVOKED_CACHE_KEY);
+  if (cached) { try { return JSON.parse(cached); } catch (e) {} }
+  var set = {};
+  readAll_('revoked_tokens').forEach(function (r) { if (r.jti) set[r.jti] = 1; });
+  try { cache.put(REVOKED_CACHE_KEY, JSON.stringify(set), REVOKED_CACHE_TTL); } catch (e) {}
+  return set;
+}
+
 function isTokenRevoked_(jti) {
-  var rows = findBy_('revoked_tokens', 'jti', jti);
-  return rows.length > 0;
+  return !!revokedSet_()[jti];
 }
 
 // ---------- request auth + RBAC ----------
@@ -127,6 +143,8 @@ function logout_(req) {
   var actor = requireAuth_(req);
   getSheet_('revoked_tokens').appendRow([actor.jti, actor.sub, new Date().toISOString(),
     new Date(actor.exp).toISOString()]);
+  invalidateRead_('revoked_tokens');
+  CacheService.getScriptCache().remove(REVOKED_CACHE_KEY); // force rebuild incl. this jti (P5)
   writeAudit_('auth.logout', 'auth_users', actor.sub, null, actor);
   return ok_({ loggedOut: true });
 }
