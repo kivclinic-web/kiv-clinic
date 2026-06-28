@@ -43,17 +43,17 @@ function consultationsCreate_(req) {
       follow_up_interval: followInterval, prescription_file_id: ''
     }, actor);
 
-    // 3) Record line items and deduct stock FEFO.
+    // 3) Deduct stock FEFO, then record the line as already-deducted (F11: drops the redundant
+    //    second write per line that only flipped the `deducted` flag — shorter lock hold).
     var prescribed = [];
     lines.forEach(function (ln) {
       var med = findById_('medicines', ln.medicine_id);
       var qty = Number(ln.quantity);
+      deductStockFEFO_(med.name_normalized || String(med.name).toLowerCase(), qty, actor, consult.id);
       var lineRec = insert_('consultation_medicines', {
         consultation_id: consult.id, medicine_id: med.id, medicine_name: med.name, quantity: qty,
-        dosage: v_string_(ln.dosage, 200), instructions: v_string_(ln.instructions, 500), deducted: false
+        dosage: v_string_(ln.dosage, 200), instructions: v_string_(ln.instructions, 500), deducted: true
       }, actor);
-      deductStockFEFO_(med.name_normalized || String(med.name).toLowerCase(), qty, actor, consult.id);
-      update_('consultation_medicines', lineRec.id, { deducted: true }, actor);
       prescribed.push({ id: lineRec.id, medicine_id: med.id, medicine_name: med.name, quantity: qty });
     });
 
@@ -119,11 +119,45 @@ function consultationsGet_(req) {
   return ok_(o);
 }
 
+/** Recent consultations across ALL pets (B9 — the "Consultations" section as a real list). */
+function consultationsList_(req) {
+  requireAuth_(req);
+  var p = req.payload || {};
+  var limit = Math.min(p.limit || 50, 200);
+  var petsById = {}; readAll_('pets').forEach(function (pt) { petsById[pt.id] = pt; });
+  var rows = readAll_('consultations').sort(byDateDesc_('consult_date')).slice(0, limit).map(function (c) {
+    var o = publicConsultation_(c);
+    var pet = petsById[c.pet_id];
+    o.pet_name = pet ? pet.name : null;
+    o.medicines = findBy_('consultation_medicines', 'consultation_id', c.id).map(function (m) {
+      return { medicine_name: m.medicine_name, quantity: m.quantity, dosage: m.dosage };
+    });
+    return o;
+  });
+  return ok_(rows, { total: rows.length });
+}
+
+/** Admin void (B3): soft-delete the consultation AND re-credit the FEFO-deducted stock to its exact
+ *  batches, reconstructed from the deduction audit trail. Reverses an erroneous prescription cleanly. */
 function consultationsDelete_(req) {
   var actor = requireAdmin_(requireAuth_(req));
-  softDelete_('consultations', req.payload.id, actor);
-  writeAudit_('consultation.delete', 'consultations', req.payload.id, null, actor);
-  return ok_({ deleted: true });
+  var id = req.payload.id;
+  var consult = findById_('consultations', id);
+  if (!consult) throw new ApiError(ERROR_CODES.NOT_FOUND, 'Consultation not found');
+  var recredited = 0;
+  readAll_('audit_log').forEach(function (a) {
+    if (a.action !== 'medicine.deduct') return;
+    var d; try { d = JSON.parse(a.details || '{}'); } catch (e) { return; }
+    if (d.consultation_id !== id || !d.taken) return;
+    var batch = findById_('medicines', a.entity_id);
+    if (!batch) return;
+    update_('medicines', batch.id, { quantity: Number(batch.quantity || 0) + Number(d.taken) }, actor);
+    writeAudit_('medicine.recredit', 'medicines', batch.id, { taken_back: d.taken, consultation_id: id }, actor);
+    recredited++;
+  });
+  softDelete_('consultations', id, actor);
+  writeAudit_('consultation.delete', 'consultations', id, { stock_recredited: recredited }, actor);
+  return ok_({ deleted: true, stock_recredited: recredited });
 }
 
 function publicConsultation_(c) {

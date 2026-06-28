@@ -40,25 +40,42 @@ function uploadDocument_(req) {
 
   var bytes = Utilities.base64Decode(p.file_base64);
   var sizeBytes = bytes.length;
-  if (storageUsedBytes_() + sizeBytes > CONFIG.DRIVE_TOTAL_BYTES) {
-    throw new ApiError(ERROR_CODES.STORAGE_FULL, 'Storage quota exceeded — free space before uploading');
-  }
   var mime = p.mime_type || 'application/octet-stream';
   var blob = Utilities.newBlob(bytes, mime, p.file_name);
 
   return withLock_(function () {
+    // F9: quota check INSIDE the lock so two concurrent uploads can't both slip past the 15GB cap.
+    if (storageUsedBytes_() + sizeBytes > CONFIG.DRIVE_TOTAL_BYTES) {
+      throw new ApiError(ERROR_CODES.STORAGE_FULL, 'Storage quota exceeded — free space before uploading');
+    }
     var folder = petDocsFolder_(pet);
     var file = folder.createFile(blob);
     file.setDescription('KIV Clinic medical document — pet ' + pet.id);
+    // Drive blob stays PRIVATE to the clinic account (never link-shared). Access is only ever via the
+    // RBAC-gated documents.serve proxy below (F10). We store the id, not a shareable URL.
     var rec = insert_('medical_documents', {
       pet_id: pet.id, consultation_id: p.consultation_id || '', doc_type: p.doc_type,
       title: v_string_(p.title || p.file_name, 200), drive_file_id: file.getId(),
-      file_url: file.getUrl(), file_name: p.file_name, mime_type: mime, size_bytes: sizeBytes,
+      file_url: '', file_name: p.file_name, mime_type: mime, size_bytes: sizeBytes,
       uploaded_by: actor.sub, uploaded_at: new Date().toISOString()
     }, actor);
     writeAudit_('document.upload', 'medical_documents', rec.id, { pet_id: pet.id, size: sizeBytes }, actor);
-    return ok_({ id: rec.id, drive_file_id: rec.drive_file_id, file_url: rec.file_url, size_bytes: sizeBytes });
+    return ok_({ id: rec.id, size_bytes: sizeBytes });
   });
+}
+
+/** F10: RBAC-gated document fetch. Streams the private Drive blob through the API as base64 so staff
+ *  (who never touch Google directly) can view it, with an access audit. Drive is never link-shared. */
+function serveDocument_(req) {
+  var actor = requireAuth_(req);
+  var doc = findById_('medical_documents', req.payload.id);
+  if (!doc || !doc.drive_file_id) throw new ApiError(ERROR_CODES.NOT_FOUND, 'Document not found');
+  var blob;
+  try { blob = DriveApp.getFileById(doc.drive_file_id).getBlob(); }
+  catch (e) { throw new ApiError(ERROR_CODES.NOT_FOUND, 'Document file is unavailable'); }
+  writeAudit_('document.view', 'medical_documents', doc.id, { pet_id: doc.pet_id }, actor);
+  return ok_({ id: doc.id, file_name: doc.file_name, mime_type: doc.mime_type, size_bytes: doc.size_bytes,
+    base64: Utilities.base64Encode(blob.getBytes()) });
 }
 
 function documentsByPet_(req) {
@@ -75,8 +92,9 @@ function documentsByConsultation_(req) {
 }
 
 function publicDoc_(d) {
+  // F10: never expose the raw Drive URL to clients — viewing goes through documents.serve (RBAC + audit).
   return { id: d.id, pet_id: d.pet_id, consultation_id: d.consultation_id, doc_type: d.doc_type,
-    title: d.title, file_url: d.file_url, file_name: d.file_name, mime_type: d.mime_type,
+    title: d.title, file_name: d.file_name, mime_type: d.mime_type,
     size_bytes: d.size_bytes, uploaded_at: d.uploaded_at };
 }
 

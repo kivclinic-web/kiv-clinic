@@ -1,6 +1,6 @@
 // screens-clinical.js — Consultation composer (atomic FEFO), Appointments, Vaccinations/Deworming.
 import {
-  html, useState, useEffect, api, asList, isAdmin, go, Icon, toast, humanError, refreshAll, invalidateApi, useEvent,
+  html, useState, useEffect, useRef, uuid, api, asList, isAdmin, go, Icon, toast, humanError, refreshAll, invalidateApi, useEvent,
   useApi, useMutation, Modal, ConfirmDialog, EmptyState, ErrorState, Loading, SkeletonRows, Spinner,
   initials, colorFor, fmtDate, fmtTime, inr, ageText, openForm, Field, Input, Textarea, Seg, Select, SaveButton,
   TYPE_CLS, TYPE_LABEL, BAR, APPT_STAT
@@ -17,6 +17,7 @@ export function Consultation({ petId }) {
   const set = (k) => (v) => setF(s => ({ ...s, [k]: v }));
   const [rx, setRx] = useState([]);
   const [busy, setBusy] = useState(false);
+  const ridRef = useRef(null); // F3: stable requestId so a retry after a lost response can't double-deduct stock
   useEffect(() => { if (petId) setPid(petId); }, [petId]);
 
   // Aggregate stock by medicine name (backend deducts FEFO across batches of the same name).
@@ -42,7 +43,8 @@ export function Consultation({ petId }) {
     setBusy(true);
     try {
       const meds = rx.filter(l => l.medicine_id && Number(l.quantity) > 0).map(l => ({ medicine_id: l.medicine_id, quantity: Number(l.quantity), dosage: l.dosage }));
-      await api('consultations.create', { pet_id: pid, diagnosis: f.diagnosis, treatment: f.treatment, clinical_notes: f.clinical_notes, follow_up_interval: f.follow_up_interval || undefined, medicines: meds }, { mutating: true });
+      if (!ridRef.current) ridRef.current = uuid();
+      await api('consultations.create', { pet_id: pid, diagnosis: f.diagnosis, treatment: f.treatment, clinical_notes: f.clinical_notes, follow_up_interval: f.follow_up_interval || undefined, medicines: meds }, { mutating: true, requestId: ridRef.current });
       let weightFailed = false;
       if (f.weight) { try { await api('petWeights.add', { pet_id: pid, weight_kg: f.weight }, { mutating: true }); } catch { weightFailed = true; } }
       toast('Consultation saved' + (meds.length ? ' · stock updated' : ''), 'ok');
@@ -97,6 +99,24 @@ export function Consultation({ petId }) {
   </section>`;
 }
 
+/* ============ Consultations list (B9) ============ */
+export function ConsultationsList() {
+  const list = useLiveApi('consultations.list', { limit: 100 }, []);
+  return html`<section data-screen-label="Consultations">
+    <div class="hdr"><div><div class="h-ey">Clinical activity</div><div class="h-ttl">Consultations</div></div>
+      <button class="btn pri" onClick=${() => go('consult')}><span class="nico">${Icon('plus')}</span>New consultation</button></div>
+    <div class="card pad">
+      ${list.loading ? SkeletonRows(5) : list.error ? html`<${ErrorState} error=${list.error} onRetry=${list.reload}/>` :
+        asList(list.data).length === 0 ? html`<${EmptyState} icon="stetho" title="No consultations yet" sub="Record a visit to start building clinical history." action=${html`<button class="btn pri" onClick=${() => go('consult')}>New consultation</button>`}/>` :
+        html`<div class="tl">${asList(list.data).map(c => html`
+          <div class="tlrow" style="cursor:pointer" onClick=${() => go('pet/' + c.pet_id)}>
+            <div class="tlbody"><div class="tlpet"><span class="peta" style="background:${colorFor(c.pet_id)}">${initials(c.pet_name || 'P')}</span>${c.pet_name || 'Pet'}<span class="tag opd">${fmtDate(c.consult_date)}</span></div>
+              <div class="tlmeta">${c.diagnosis || 'Visit'}${(c.medicines || []).length ? ' · ' + c.medicines.length + ' medicine' + (c.medicines.length > 1 ? 's' : '') : ''}</div></div>
+            <div class="row-actions"><span class="nico fnt">${Icon('chevron')}</span></div></div>`)}</div>`}
+    </div>
+  </section>`;
+}
+
 /* ============ Appointments ============ */
 export function Appointments() {
   const [archived, setArchived] = useState(false);
@@ -130,24 +150,28 @@ export function Appointments() {
 
 function ApptActions({ appt, close }) {
   const [when, setWhen] = useState(toLocal(appt.scheduled_at));
+  const [type, setType] = useState(appt.type);
+  const [reason, setReason] = useState(appt.reason || '');
   const [busy, setBusy] = useState('');
   const [confirmCancel, setConfirmCancel] = useState(false);
   async function run(kind) {
     setBusy(kind);
     try {
-      if (kind === 'reschedule') await api('appointments.reschedule', { id: appt.id, scheduled_at: new Date(when).toISOString() }, { mutating: true });
+      // M1: a booked appointment's type/reason/time are all editable (not just reschedule).
+      if (kind === 'save') await api('appointments.update', { id: appt.id, type: type, reason: reason, scheduled_at: new Date(when).toISOString() }, { mutating: true });
       if (kind === 'complete') await api('appointments.update', { id: appt.id, status: 'completed' }, { mutating: true });
       if (kind === 'cancel') await api('appointments.cancel', { id: appt.id }, { mutating: true });
-      toast(kind === 'cancel' ? 'Appointment cancelled' : kind === 'complete' ? 'Marked completed' : 'Rescheduled', 'ok');
+      toast(kind === 'cancel' ? 'Appointment cancelled' : kind === 'complete' ? 'Marked completed' : 'Appointment updated', 'ok');
       refreshAll(); close();
     } catch (e) { toast(humanError(e), 'err'); setBusy(''); }
   }
   return html`<${Modal} title=${`${appt.pet_name} · ${TYPE_LABEL(appt.type)}`} onClose=${close}
     footer=${html`<button class="btn gho" style="margin-right:auto;color:var(--red)" disabled=${busy} onClick=${() => setConfirmCancel(true)}>${busy === 'cancel' ? Spinner(16) : 'Cancel visit'}</button>
       <button class="btn gho" disabled=${busy} onClick=${() => run('complete')}>${busy === 'complete' ? Spinner(16) : 'Mark completed'}</button>
-      <button class="btn pri" disabled=${busy} onClick=${() => run('reschedule')}>${busy === 'reschedule' ? html`${Spinner(16)} Saving…` : 'Reschedule'}</button>`}>
-    <div class="alsub" style="margin-bottom:12px">${appt.reason || '—'}</div>
-    <${Field} label="New date & time"><${Input} type="datetime-local" value=${when} onInput=${setWhen}/><//>
+      <button class="btn pri" disabled=${busy} onClick=${() => run('save')}>${busy === 'save' ? html`${Spinner(16)} Saving…` : 'Save changes'}</button>`}>
+    <${Field} label="Type"><${Seg} value=${type} onInput=${setType} options=${[['OPD', 'OPD'], ['Surgery', 'Surgery'], ['Grooming', 'Grooming'], ['FollowUp', 'Follow-up']]}/><//>
+    <${Field} label="Date & time"><${Input} type="datetime-local" value=${when} onInput=${setWhen}/><//>
+    <${Field} label="Reason"><${Input} value=${reason} onInput=${setReason} placeholder="Presenting complaint / purpose"/><//>
     ${confirmCancel && html`<${ConfirmDialog} title="Cancel this visit?" danger=${true} confirmLabel="Cancel visit" body=${`Cancel ${appt.pet_name}'s ${TYPE_LABEL(appt.type)} appointment? This can't be undone from here.`} onConfirm=${() => run('cancel')} onClose=${() => setConfirmCancel(false)}/>`}
   <//>`;
 }

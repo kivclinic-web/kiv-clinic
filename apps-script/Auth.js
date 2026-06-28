@@ -74,12 +74,33 @@ function signToken_(claims) {
 
 function issueToken_(user) {
   var claims = { sub: user.id, role: user.role, jti: Utilities.getUuid(),
-    exp: new Date().getTime() + CONFIG.TOKEN_TTL_MS };
+    epoch: Number(user.token_epoch || 1), exp: new Date().getTime() + CONFIG.TOKEN_TTL_MS };
   return { token: signToken_(claims), claims: claims };
 }
 
+/**
+ * Cross-request snapshot of each user's {epoch, status, must_reset}, cached in CacheService so the
+ * auth hot path checks disable/epoch/reset with a cheap cache get instead of a sheet read per request
+ * (preserves the read-path latency wins). Invalidated on any user mutation; 300s TTL backstop.
+ */
+function authStateSnapshot_() {
+  var cache = CacheService.getScriptCache();
+  var hit = cache.get('auth_state');
+  if (hit) { try { return JSON.parse(hit); } catch (e) {} }
+  var map = {};
+  readAll_('auth_users').forEach(function (u) {
+    map[u.id] = { epoch: Number(u.token_epoch || 1), status: u.status, must_reset: v_bool_(u.must_reset) };
+  });
+  try { cache.put('auth_state', JSON.stringify(map), 300); } catch (e) {}
+  return map;
+}
+function invalidateAuthState_() { try { CacheService.getScriptCache().remove('auth_state'); } catch (e) {} }
+
+// Per-execution memo so the router's must_reset gate and the handler's own requireAuth_ verify once.
+var __tokenMemo = {};
 function verifyToken_(token) {
   if (!token) throw new ApiError(ERROR_CODES.AUTH_REQUIRED, 'Authentication required');
+  if (__tokenMemo[token]) return __tokenMemo[token];
   var parts = String(token).split('.');
   if (parts.length !== 2) throw new ApiError(ERROR_CODES.AUTH_INVALID, 'Malformed token');
   var secret = prop_(CONFIG.PROP.TOKEN_SECRET, true);
@@ -90,6 +111,14 @@ function verifyToken_(token) {
   catch (e) { throw new ApiError(ERROR_CODES.AUTH_INVALID, 'Invalid token payload'); }
   if (!claims.exp || claims.exp < new Date().getTime()) throw new ApiError(ERROR_CODES.AUTH_INVALID, 'Token expired');
   if (isTokenRevoked_(claims.jti)) throw new ApiError(ERROR_CODES.AUTH_INVALID, 'Token revoked');
+  // F5/F6: reject if the account is disabled/gone or the token predates an epoch bump (disable,
+  // role change, or password change). F7: surface must_reset so the router can gate the session.
+  var st = authStateSnapshot_()[claims.sub];
+  if (!st) throw new ApiError(ERROR_CODES.AUTH_INVALID, 'Account no longer exists');
+  if (st.status === 'disabled') throw new ApiError(ERROR_CODES.AUTH_INVALID, 'Account disabled');
+  if (Number(claims.epoch || 1) !== Number(st.epoch || 1)) throw new ApiError(ERROR_CODES.AUTH_INVALID, 'Session expired — please sign in again');
+  claims.must_reset = st.must_reset;
+  __tokenMemo[token] = claims;
   return claims;
 }
 
@@ -144,13 +173,21 @@ function login_(req) {
   }
   var v = verifyPassword_(password, user.password_salt, user.password_hash);
   if (!v.ok) {
-    var attempts = Number(user.failed_attempts || 0) + 1;
-    var fpatch = { failed_attempts: attempts };
-    if (attempts >= CONFIG.MAX_FAILED_ATTEMPTS) {
-      fpatch.locked_until = new Date(new Date().getTime() + CONFIG.LOCKOUT_MS).toISOString();
-      fpatch.failed_attempts = 0;
-    }
-    withLock_(function () { update_('auth_users', user.id, fpatch, null); });
+    // F4: read-increment-write the failure counter atomically. We re-read the row FRESH inside the
+    // lock (invalidate the request cache first) so N concurrent wrong guesses can't all read the same
+    // stale count and skip the lockout. Hash already happened above, outside the lock (fast-login win).
+    var attempts;
+    withLock_(function () {
+      invalidateRead_('auth_users');
+      var fresh = findById_('auth_users', user.id) || user;
+      attempts = Number(fresh.failed_attempts || 0) + 1;
+      var fpatch = { failed_attempts: attempts };
+      if (attempts >= CONFIG.MAX_FAILED_ATTEMPTS) {
+        fpatch.locked_until = new Date(new Date().getTime() + CONFIG.LOCKOUT_MS).toISOString();
+        fpatch.failed_attempts = 0;
+      }
+      update_('auth_users', user.id, fpatch, null);
+    });
     writeAudit_('auth.login_failed', 'auth_users', user.id, { attempts: attempts });
     throw new ApiError(ERROR_CODES.AUTH_INVALID, 'Invalid credentials');
   }
@@ -183,9 +220,17 @@ function changePassword_(req) {
   var newPlain = v_string_(req.payload.new);
   if (newPlain.length < 8) throw new ApiError(ERROR_CODES.VALIDATION_ERROR, 'Password must be at least 8 characters');
   var salt = genSalt_();
-  update_('auth_users', user.id, { password_salt: salt, password_hash: hashPassword_(newPlain, salt), must_reset: false }, actor);
+  // F6: bump token_epoch to invalidate every OTHER session for this user (phished/shared-tablet case).
+  // F7: clear must_reset. We then re-issue a token for THIS session at the new epoch so the user who
+  // just set their password isn't immediately logged out by their own change.
+  var newEpoch = Number(user.token_epoch || 1) + 1;
+  update_('auth_users', user.id, { password_salt: salt, password_hash: hashPassword_(newPlain, salt),
+    must_reset: false, token_epoch: newEpoch }, actor);
+  invalidateAuthState_();
   writeAudit_('auth.password_change', 'auth_users', user.id, null, actor);
-  return ok_({ changed: true });
+  var fresh = findById_('auth_users', user.id);
+  var t = issueToken_(fresh);
+  return ok_({ changed: true, token: t.token, role: fresh.role, display_name: fresh.display_name, must_reset: false });
 }
 
 // ---------- user management (admin) ----------
@@ -227,8 +272,9 @@ function createUserRecord_(payload, actor) {
   var user = insert_('auth_users', {
     identifier: identifier, identifier_type: type, display_name: v_string_(payload.display_name, 120),
     role: role, password_hash: hashPassword_(plain, salt), password_salt: salt,
-    status: 'active', must_reset: true, failed_attempts: 0, locked_until: '', last_login_at: ''
+    status: 'active', must_reset: true, failed_attempts: 0, locked_until: '', last_login_at: '', token_epoch: 1
   }, actor);
+  invalidateAuthState_();
   return { user: user, password: plain };
 }
 
@@ -244,11 +290,35 @@ function listUsers_(req) {
 function updateUser_(req) {
   var actor = requireAdmin_(requireAuth_(req));
   var id = req.payload.id;
+  var existing = findById_('auth_users', id);
+  if (!existing) throw new ApiError(ERROR_CODES.NOT_FOUND, 'User not found');
   var patch = {};
   if (req.payload.display_name !== undefined) patch.display_name = v_string_(req.payload.display_name, 120);
   if (req.payload.role !== undefined) patch.role = v_enum_(req.payload.role, 'role');
   if (req.payload.status !== undefined) patch.status = v_enum_(req.payload.status, 'user_status');
+  // F5: disabling or changing a role must immediately invalidate that user's live tokens (no 8h window).
+  var revoke = (patch.status === 'disabled' && existing.status !== 'disabled') ||
+    (patch.role !== undefined && patch.role !== existing.role);
+  if (revoke) patch.token_epoch = Number(existing.token_epoch || 1) + 1;
   var updated = update_('auth_users', id, patch, actor);
+  invalidateAuthState_();
   writeAudit_('users.update', 'auth_users', id, patch, actor);
   return ok_({ id: updated.id });
+}
+
+/** Admin password reset (B5): regenerate a one-time password, force reset, and revoke live sessions. */
+function resetUserPassword_(req) {
+  var actor = requireAdmin_(requireAuth_(req));
+  var id = req.payload.id;
+  var user = findById_('auth_users', id);
+  if (!user) throw new ApiError(ERROR_CODES.NOT_FOUND, 'User not found');
+  var plain = generatePassword_();
+  var salt = genSalt_();
+  update_('auth_users', id, {
+    password_salt: salt, password_hash: hashPassword_(plain, salt), must_reset: true,
+    failed_attempts: 0, locked_until: '', token_epoch: Number(user.token_epoch || 1) + 1
+  }, actor);
+  invalidateAuthState_();
+  writeAudit_('users.reset_password', 'auth_users', id, null, actor);
+  return ok_({ id: id, identifier: user.identifier, password: plain, note: 'Deliver securely; shown only once.' });
 }

@@ -4,7 +4,7 @@
  */
 
 var CONFIG = {
-  SCHEMA_VERSION: 1,
+  SCHEMA_VERSION: 2,  // v2: auth_users.token_epoch (session revocation on disable/password-change)
 
   // Auth / security
   // Key-stretching for password hashing. NOTE: each iteration is a Utilities.computeDigest call,

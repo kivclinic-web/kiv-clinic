@@ -1,9 +1,9 @@
 // core.js — shared primitives for every screen: helpers, data hooks, the write-feedback mutation
 // pattern, toasts, modal + form controls. Screen modules import ONLY from here (no circular deps).
 import { html, render, useState, useEffect, useRef } from './vendor/preact-standalone.module.js';
-import { api, humanError, ApiError, isAdmin, getSession, subscribeActivity, getActivity } from './api.js';
+import { api, humanError, ApiError, isAdmin, getSession, subscribeActivity, getActivity, uuid } from './api.js';
 import { Icon } from './icons.js';
-export { html, useState, useEffect, useRef, render, api, humanError, ApiError, isAdmin, getSession, Icon };
+export { html, useState, useEffect, useRef, render, api, humanError, ApiError, isAdmin, getSession, Icon, uuid };
 
 /* ---------- formatting helpers ---------- */
 const PALETTE = ['#0E7C6E', '#6E5BB0', '#B07C2C', '#3A6E96', '#BB493B', '#0A5A50', '#9A6A2C'];
@@ -225,10 +225,15 @@ export function SyncBanner() {
 export function useMutation(action, { successMsg = 'Saved', onSuccess } = {}) {
   const [busy, setBusy] = useState(false);
   const [fieldErrors, setFieldErrors] = useState(null);
+  const ridRef = useRef(null);
   async function run(payload, opts = {}) {
     setBusy(true); setFieldErrors(null);
+    // F3: reuse ONE requestId across manual retries of the same submission so a lost-response retry
+    // dedups server-side (no duplicate record / double stock deduction). Cleared only on success.
+    if (!ridRef.current) ridRef.current = uuid();
     try {
-      const data = await api(action, payload, { mutating: true });
+      const data = await api(action, payload, { mutating: true, requestId: ridRef.current });
+      ridRef.current = null;
       toast(opts.successMsg || successMsg, 'ok');
       onSuccess && onSuccess(data);
       return data;
@@ -245,6 +250,20 @@ export function useMutation(action, { successMsg = 'Saved', onSuccess } = {}) {
 }
 
 export async function copyText(text) { try { await navigator.clipboard.writeText(text); toast('Copied', 'ok'); } catch { toast('Copy failed', 'err'); } }
+
+/** F10: open a private medical document by fetching it through the RBAC-gated serve proxy (never a
+ *  public Drive link). Streams base64 → Blob → new tab. */
+export async function openDocument(id) {
+  toast('Opening document…', 'ok');
+  try {
+    const d = await api('documents.serve', { id });
+    const bin = atob(d.base64); const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const url = URL.createObjectURL(new Blob([bytes], { type: d.mime_type || 'application/octet-stream' }));
+    window.open(url, '_blank');
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  } catch (e) { toast(humanError(e), 'err'); }
+}
 
 /* ---------- form controls ---------- */
 export function Field({ label, error, children, hint }) {

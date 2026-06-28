@@ -104,6 +104,25 @@ function seedReferenceData_() {
   return seeded;
 }
 
+/**
+ * Auto-apply schema migrations on deploy (called once per cold instance from doPost). Guarded by the
+ * SCHEMA_APPLIED script property so it's a single cheap property read on the hot path once applied.
+ * v2 appends auth_users.token_epoch — ensureTabs_ adds the trailing header column; existing rows read
+ * '' and default to epoch 1. Safe because token_epoch is the LAST column (pure append, no shift).
+ */
+function ensureSchema_() {
+  if (Number(prop_('SCHEMA_APPLIED') || 0) >= CONFIG.SCHEMA_VERSION) return;
+  withLock_(function () {
+    var applied = Number(PropertiesService.getScriptProperties().getProperty('SCHEMA_APPLIED') || 0);
+    if (applied >= CONFIG.SCHEMA_VERSION) return;
+    ensureTabs_();                  // adds any missing trailing header columns (e.g. token_epoch)
+    invalidateRead_('auth_users');  // clear request-scoped cache; header cache is schema_version-keyed
+    setProp_('SCHEMA_APPLIED', String(CONFIG.SCHEMA_VERSION));
+    setMeta_('schema_version', String(CONFIG.SCHEMA_VERSION));
+    console.log('schema_migrated_to', CONFIG.SCHEMA_VERSION);
+  });
+}
+
 function clinicInfoRow_() { var r = readCachedTable_('clinic_info', 1800); return r.length ? r[0] : null; }
 
 /** Upsert a key/value into the _meta tab (no `id` column, so handled directly). */

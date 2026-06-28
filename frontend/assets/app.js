@@ -22,7 +22,7 @@ function warmUp() {
 }
 import { FormHost } from './forms.js';
 import { Clients, Pets, PetTimeline } from './screens-people.js';
-import { Consultation, Appointments, Vaccinations } from './screens-clinical.js';
+import { Consultation, ConsultationsList, Appointments, Vaccinations } from './screens-clinical.js';
 import { Inventory, Reports, Settings } from './screens-ops.js';
 
 /* ---------------- login ---------------- */
@@ -34,7 +34,8 @@ function Login({ onAuthed }) {
     e.preventDefault(); setErr(null); setBusy(true);
     try {
       const d = await api('auth.login', { identifier: idf, identifier_type: type, password: pw });
-      setSession(d.token, { role: d.role, display_name: d.display_name });
+      // F7: persist must_reset so a reload can't drop a temp-password session into the app.
+      setSession(d.token, { role: d.role, display_name: d.display_name, must_reset: !!d.must_reset });
       if (d.must_reset) { setMustReset(true); setBusy(false); return; }
       onAuthed();
     } catch (e) { setErr(e); setBusy(false); }
@@ -44,8 +45,13 @@ function Login({ onAuthed }) {
     if (np.length < 8) return setErr(new ApiError('VALIDATION_ERROR', 'New password must be at least 8 characters.'));
     if (np !== np2) return setErr(new ApiError('VALIDATION_ERROR', 'Passwords do not match.'));
     setBusy(true);
-    try { await api('auth.changePassword', { old: pw, new: np }, { mutating: true }); toast('Password updated', 'ok'); onAuthed(); }
-    catch (e) { setErr(e); setBusy(false); }
+    try {
+      // Backend re-issues a fresh token at the new epoch (old sessions are revoked). Adopt it so this
+      // session stays valid and is no longer flagged must_reset.
+      const d = await api('auth.changePassword', { old: pw, new: np }, { mutating: true });
+      if (d && d.token) setSession(d.token, { role: d.role, display_name: d.display_name, must_reset: false });
+      toast('Password updated', 'ok'); onAuthed();
+    } catch (e) { setErr(e); setBusy(false); }
   }
   return html`<div class="authwrap"><div class="authcard">
     <div class="authbrand"><div class="logo">KV</div><div><div class="bname">${APP_NAME}</div><div class="btag">Clinic OS</div></div></div>
@@ -61,6 +67,7 @@ function Login({ onAuthed }) {
       <div class="field"><label class="lab">Confirm new password</label><input class="inp" type="password" autocomplete="new-password" value=${np2} onInput=${e => setNp2(e.target.value)}/></div>
       <button class="btn pri" style="width:100%" disabled=${busy}>${busy ? html`${Spinner(16)} Saving…` : 'Update & continue'}</button>
     </form>`}
+    ${!mustReset && html`<div class="authfoot">First time setting up the clinic? <a href="https://github.com/kivclinic-web/kiv-clinic#first-run-setup" target="_blank" rel="noopener">Read the setup guide</a> to create the administrator account.</div>`}
   </div></div>`;
 }
 
@@ -71,7 +78,7 @@ const MNAV = [['today', 'Today', 'home'], ['clients', 'Clients', 'users'], ['app
 
 /* ---------------- Quick Add ---------------- */
 const QA_TILES = [
-  ['New consultation', 'Record a visit', 'stetho', 'var(--tealtint)', { view: 'consultations' }],
+  ['New consultation', 'Record a visit', 'stetho', 'var(--tealtint)', { view: 'consult' }],
   ['Book appointment', 'OPD · Surgery · Groom', 'cal', 'var(--ambtint)', { form: 'appointment' }],
   ['Add client', 'New pet owner', 'users', 'var(--vtint)', { form: 'client' }],
   ['Record vaccination', 'Auto due date', 'syringe', '#E2EEF6', { form: 'vaccination' }],
@@ -114,6 +121,32 @@ function QuickAdd({ close }) {
 }
 
 /* ---------------- shell ---------------- */
+/* Reminders bell with a live count badge and a dropdown panel (B10). */
+function RemindersBell() {
+  const [open, setOpen] = useState(false);
+  const r = useApi('reminders.all', {});
+  useEvent('kiv-refresh', () => r.reload(), []);
+  const d = r.data || {};
+  const groups = [
+    ['Appointments today', d.appointments_today, 'cal', (x) => `${x.pet_name || 'Pet'} · ${TYPE_LABEL(x.type)}`],
+    ['Overdue vaccinations', d.vaccinations_overdue, 'syringe', (x) => `${x.pet_name} · ${x.vaccine_name}`],
+    ['Vaccinations due', d.vaccinations_due, 'syringe', (x) => `${x.pet_name} · ${x.vaccine_name}`],
+    ['Dewormings due', d.dewormings_due, 'drop', (x) => x.pet_name]
+  ].filter(g => (g[1] || []).length);
+  const count = groups.reduce((s, g) => s + g[1].length, 0);
+  return html`<div style="position:relative">
+    <button class="ibtn" aria-label=${`Reminders${count ? ' (' + count + ')' : ''}`} title="Reminders" onClick=${() => setOpen(o => !o)}>${Icon('bell')}${count > 0 ? html`<span class="bellbadge">${count > 9 ? '9+' : count}</span>` : ''}</button>
+    ${open && html`<div class="bellscrim" onClick=${() => setOpen(false)}></div>
+      <div class="rempanel" onClick=${e => e.stopPropagation()}>
+        <div class="remhead">Reminders ${count ? `· ${count}` : ''}</div>
+        ${r.loading && !r.data ? html`<div class="alsub" style="padding:14px">Loading…</div>` :
+          count === 0 ? html`<div class="alsub" style="padding:16px">Nothing needs attention right now. 🎉</div>` :
+          groups.map(g => html`<div class="remgroup"><div class="remglabel">${Icon(g[2], 13)} ${g[0]} · ${g[1].length}</div>
+            ${g[1].slice(0, 6).map(x => html`<button class="remitem" onClick=${() => { setOpen(false); go(x.pet_id ? 'pet/' + x.pet_id : 'appointments'); }}>${g[3](x)}</button>`)}</div>`)}
+      </div>`}
+  </div>`;
+}
+
 function Shell({ route, children, onQuick }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const session = getSession() || {};
@@ -134,7 +167,7 @@ function Shell({ route, children, onQuick }) {
         <button class="search" onClick=${onQuick}><span class="nico">${Icon('search')}</span><span>Search clients, pets, medicines…</span><span class="kbd">⌘K</span></button>
         <button class="qbtn" onClick=${onQuick}><span class="nico">${Icon('plus')}</span><span>Quick add</span></button>
         <${SyncDot}/>
-        <button class="ibtn" aria-label="Reminders" title="Reminders" onClick=${() => go('today')}>${Icon('bell')}</button>
+        <${RemindersBell}/>
       </header>
       <div class="view"><${SyncBanner}/>${children}</div>
     </div>
@@ -178,6 +211,14 @@ function Dashboard() {
       <div class="herosub">${k.loading ? html`<${WaitHint} base="Loading your day"/>` : k.error ? 'Could not load your summary.' :
         html`You have <b>${kpis.todays_appointments || 0} appointment${kpis.todays_appointments === 1 ? '' : 's'}</b> today — <b>${kpis.followups_today || 0} follow-up${kpis.followups_today === 1 ? '' : 's'}</b> and <b>${kpis.vaccinations_due || 0} vaccination${kpis.vaccinations_due === 1 ? '' : 's'} due</b>.${kpis.completed_appointments ? ` ${kpis.completed_appointments} already wrapped up.` : ''}`}</div></div>
       <button class="btn pri" onClick=${() => dispatchEvent(new CustomEvent('kiv-quick'))}><span class="nico">${Icon('plus')}</span>Quick add</button></div>
+    ${!k.loading && s.data && !kpis.current_inventory_value && !(kpis.todays_appointments || kpis.vaccinations_due || kpis.low_stock_medicines || kpis.expiring_medicines) && html`
+      <div class="card pad" style="margin-bottom:18px"><div class="sectttl" style="margin-bottom:4px">Get started</div>
+        <div class="alsub" style="margin-bottom:12px">Set up your clinic in a few steps.</div>
+        <div class="qalist">
+          <button class="qarow" onClick=${() => openForm('client')}><span class="peta" style="background:var(--teal)">1</span><div style="flex:1;text-align:left"><div style="font-weight:700;font-size:14px">Add your first client & pet</div><div class="alsub">Register an owner — you'll be prompted to add their pet next</div></div>${Icon('chevron')}</button>
+          <button class="qarow" onClick=${() => openForm('medicine')}><span class="peta" style="background:var(--amber)">2</span><div style="flex:1;text-align:left"><div style="font-weight:700;font-size:14px">Stock a medicine</div><div class="alsub">Add an inventory batch with expiry & price</div></div>${Icon('chevron')}</button>
+          ${isAdmin() && html`<button class="qarow" onClick=${() => go('settings')}><span class="peta" style="background:var(--violet)">3</span><div style="flex:1;text-align:left"><div style="font-weight:700;font-size:14px">Set clinic info & add staff</div><div class="alsub">Clinic name, contact, and manager accounts</div></div>${Icon('chevron')}</button>`}
+        </div></div>`}
     ${k.loading ? SkeletonKpis(9) : k.error ? html`<${ErrorState} error=${k.error} onRetry=${k.reload}/>` : html`
       <div class="kpis">${KPI_DEFS.map(([key, label, ic, tint, color, view]) => html`<button class="kpi" onClick=${() => go(view)}><div class="kpitop"><span class="kdot" style="background:${tint};color:${color}">${Icon(ic, 17)}</span></div><div class="kpinum" style="color:${color}">${kpis[key] ?? 0}</div><div class="kpilbl">${label}</div></button>`)}
         <button class="kpi" onClick=${() => go('reports')}><div class="kpitop"><span class="kdot" style="background:var(--tealtint);color:var(--teal)">${Icon('chart', 17)}</span></div><div class="kpinum" style="color:var(--teal)">${inr(kpis.current_inventory_value)}</div><div class="kpilbl">Inventory value</div></button></div>`}
@@ -216,7 +257,9 @@ function AttentionList({ widgets: w, reminders }) {
 
 /* ---------------- root ---------------- */
 function App() {
-  const [authed, setAuthed] = useState(!!getSession());
+  // A session still flagged must_reset isn't fully authed — force it back through login → reset (F7).
+  const _sess = getSession();
+  const [authed, setAuthed] = useState(!!_sess && !_sess.must_reset);
   const [quick, setQuick] = useState(false);
   const route = useHashRoute();
   useEvent('kiv-quick', () => setQuick(true), []);
@@ -230,7 +273,8 @@ function App() {
     case 'pets': screen = html`<${Pets}/>`; break;
     case 'pet': screen = html`<${PetTimeline} id=${route.param}/>`; break;
     case 'appointments': screen = html`<${Appointments}/>`; break;
-    case 'consultations': screen = html`<${Consultation} petId=${route.param}/>`; break;
+    case 'consultations': screen = html`<${ConsultationsList}/>`; break;
+    case 'consult': screen = html`<${Consultation} petId=${route.param}/>`; break;
     case 'vaccinations': screen = html`<${Vaccinations}/>`; break;
     case 'inventory': screen = html`<${Inventory}/>`; break;
     case 'reports': screen = html`<${Reports}/>`; break;

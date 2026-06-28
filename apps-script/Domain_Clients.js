@@ -63,14 +63,30 @@ function clientsGet_(req) {
   return ok_({ client: publicClient_(client), pets: pets });
 }
 
+/** Soft-delete a pet AND its child records (F8: no orphans/dangling FKs). Caller holds the lock. */
+function cascadeSoftDeletePet_(petId, actor) {
+  softDelete_('pets', petId, actor);
+  ['consultations', 'appointments', 'vaccinations', 'dewormings', 'medical_documents'].forEach(function (tab) {
+    findBy_(tab, 'pet_id', petId).forEach(function (row) { softDelete_(tab, row.id, actor); });
+  });
+}
+
 function clientsDelete_(req) {
   var actor = requireAdmin_(requireAuth_(req));
+  var p = req.payload || {};
   return withLock_(function () {
-    var pets = findBy_('pets', 'client_id', req.payload.id);
-    if (pets.length) throw new ApiError(ERROR_CODES.CONFLICT, 'Delete or reassign the client\'s pets first');
-    softDelete_('clients', req.payload.id, actor);
-    writeAudit_('client.delete', 'clients', req.payload.id, null, actor);
-    return ok_({ deleted: true });
+    var pets = findBy_('pets', 'client_id', p.id);
+    // B2/F8: instead of a dead-end, offer the cascade the message used to demand. Without explicit
+    // confirmation we still refuse, returning the pet count so the UI can ask.
+    if (pets.length && !p.cascade) {
+      throw new ApiError(ERROR_CODES.CONFLICT,
+        'This owner has ' + pets.length + ' pet(s). Deleting the owner will delete them and their records.',
+        { pets: pets.length });
+    }
+    pets.forEach(function (pet) { cascadeSoftDeletePet_(pet.id, actor); });
+    softDelete_('clients', p.id, actor);
+    writeAudit_('client.delete', 'clients', p.id, { cascade_pets: pets.length }, actor);
+    return ok_({ deleted: true, pets_deleted: pets.length });
   });
 }
 
@@ -105,6 +121,7 @@ function petsUpdate_(req) {
   if (p.species !== undefined) patch.species = v_enum_(p.species, 'species');
   if (p.date_of_birth !== undefined) patch.date_of_birth = dateOrEmpty_(v_date_(p.date_of_birth));
   if (p.neutered !== undefined) patch.neutered = v_bool_(p.neutered);
+  if (p.client_id !== undefined) { checkForeignKeys_('pets', { client_id: p.client_id }); patch.client_id = p.client_id; } // reassign owner (B2)
   var rec = update_('pets', p.id, patch, actor);
   writeAudit_('pet.update', 'pets', p.id, patch, actor);
   return ok_(publicPet_(rec));
@@ -163,8 +180,9 @@ function petsGet_(req) {
 
 function petsDelete_(req) {
   var actor = requireAdmin_(requireAuth_(req));
-  softDelete_('pets', req.payload.id, actor);
-  writeAudit_('pet.delete', 'pets', req.payload.id, null, actor);
+  if (!findById_('pets', req.payload.id)) throw new ApiError(ERROR_CODES.NOT_FOUND, 'Pet not found');
+  cascadeSoftDeletePet_(req.payload.id, actor); // F8: cascade to consultations/appts/vacc/deworm/docs
+  writeAudit_('pet.delete', 'pets', req.payload.id, { cascade: true }, actor);
   return ok_({ deleted: true });
 }
 

@@ -1,9 +1,19 @@
 // forms.js — create/edit modals. Every form uses useMutation → visible pending state + success toast
 // + inline field errors (e.g. duplicate mobile). FormHost renders the right form for `openForm(entity)`.
 import {
-  html, useState, useEffect, api, asList, toast, refreshAll, go, Icon, copyText,
-  useApi, useMutation, useEvent, Modal, Field, Input, Textarea, Select, Seg, SaveButton, Spinner, FauxProgress
+  html, useState, useEffect, api, asList, isAdmin, toast, refreshAll, go, Icon, copyText, openForm,
+  useApi, useMutation, useEvent, Modal, ConfirmDialog, Field, Input, Textarea, Select, Seg, SaveButton, Spinner, FauxProgress
 } from './core.js';
+
+/** Admin-only delete control + confirm for an edit modal (M3). */
+function useDeleteControl(action, label, id, body, close) {
+  const [open, setOpen] = useState(false);
+  const del = useMutation(action, { successMsg: label + ' deleted', onSuccess: () => { refreshAll(); close(); } });
+  return {
+    button: html`<button type="button" class="btn gho" style="margin-right:auto;color:var(--red)" onClick=${() => setOpen(true)}>${Icon('trash', 16)} Delete</button>`,
+    dialog: open && html`<${ConfirmDialog} title=${'Delete ' + label.toLowerCase() + '?'} danger=${true} confirmLabel="Delete" body=${body} onConfirm=${() => del.run({ id })} onClose=${() => setOpen(false)}/>`
+  };
+}
 
 const ferr = (errs, key) => errs && errs[key];
 
@@ -13,7 +23,8 @@ export function ClientForm({ props, close }) {
   const [f, setF] = useState({ name: init.name || '', mobile: init.mobile || '', address: init.address || '', email: init.email || '' });
   const set = (k) => (v) => setF(s => ({ ...s, [k]: v }));
   const edit = !!init.id;
-  const m = useMutation(edit ? 'clients.update' : 'clients.create', { successMsg: edit ? 'Client updated' : 'Client added', onSuccess: () => { refreshAll(); close(); } });
+  // B8: after creating a NEW owner, chain straight into adding their pet (the #1 front-desk flow).
+  const m = useMutation(edit ? 'clients.update' : 'clients.create', { successMsg: edit ? 'Client updated' : 'Client added', onSuccess: (data) => { refreshAll(); close(); if (!edit && data && data.id) setTimeout(() => openForm('pet', { client_id: data.id }), 0); } });
   const submit = (e) => { e.preventDefault(); m.run(edit ? { id: init.id, ...f } : f).catch(() => {}); };
   return html`<${Modal} title=${edit ? 'Edit client' : 'Add client'} onClose=${close}
     footer=${html`<button class="btn gho" onClick=${close}>Cancel</button><${SaveButton} busy=${m.busy} label=${edit ? 'Save changes' : 'Add client'} onClick=${submit}/>`}>
@@ -41,7 +52,7 @@ export function PetForm({ props, close }) {
   return html`<${Modal} title=${edit ? 'Edit pet' : 'Add pet'} onClose=${close}
     footer=${html`<button class="btn gho" onClick=${close}>Cancel</button><${SaveButton} busy=${m.busy} disabled=${ownerLoading} label=${edit ? 'Save changes' : 'Add pet'} onClick=${submit}/>`}>
     <form onSubmit=${submit}>
-      ${!props.client_id && html`<${Field} label="Owner" error=${(ferr(m.fieldErrors, 'client_id') && 'Choose a valid owner.') || (clients.error && !clients.data && 'Couldn’t load owners — retry.')}><${Select} value=${f.client_id} onInput=${set('client_id')} options=${clientOpts} loading=${ownerLoading}/><//>`}
+      ${!props.client_id && html`<${Field} label="Owner" error=${(ferr(m.fieldErrors, 'client_id') && 'Choose a valid owner.') || (clients.error && !clients.data && 'Couldn’t load owners — retry.')} hint=${html`Owner not listed? <button type="button" class="lnk" onClick=${() => { close(); setTimeout(() => openForm('client'), 0); }}>＋ Add new owner</button>`}><${Select} value=${f.client_id} onInput=${set('client_id')} options=${clientOpts} loading=${ownerLoading}/><//>`}
       <${Field} label="Pet name" error=${ferr(m.fieldErrors, 'name')}><${Input} value=${f.name} onInput=${set('name')} autofocus=${true}/><//>
       <div class="formgrid">
         <${Field} label="Species"><${Select} value=${f.species} onInput=${set('species')} options=${[['dog', 'Dog'], ['cat', 'Cat'], ['other', 'Other']]}/><//>
@@ -65,8 +76,9 @@ export function SupplierForm({ props, close }) {
   const edit = !!init.id;
   const m = useMutation(edit ? 'suppliers.update' : 'suppliers.create', { successMsg: edit ? 'Supplier updated' : 'Supplier added', onSuccess: () => { refreshAll(); close(); } });
   const submit = (e) => { e.preventDefault(); m.run(edit ? { id: init.id, ...f } : f).catch(() => {}); };
+  const delCtl = useDeleteControl('suppliers.delete', 'Supplier', init.id, `Remove supplier "${init.name || ''}"? Medicines keep their record.`, close);
   return html`<${Modal} title=${edit ? 'Edit supplier' : 'Add supplier'} onClose=${close}
-    footer=${html`<button class="btn gho" onClick=${close}>Cancel</button><${SaveButton} busy=${m.busy} label="Save" onClick=${submit}/>`}>
+    footer=${html`${edit && isAdmin() && delCtl.button}<button class="btn gho" onClick=${close}>Cancel</button><${SaveButton} busy=${m.busy} label="Save" onClick=${submit}/>${delCtl.dialog}`}>
     <form onSubmit=${submit}>
       <${Field} label="Supplier name" error=${ferr(m.fieldErrors, 'name')}><${Input} value=${f.name} onInput=${set('name')} autofocus=${true}/><//>
       <div class="formgrid">
@@ -90,8 +102,9 @@ export function MedicineForm({ props, close }) {
   const m = useMutation(edit ? 'medicines.update' : 'medicines.create', { successMsg: edit ? 'Medicine updated' : 'Medicine added', onSuccess: () => { refreshAll(); close(); } });
   const submit = (e) => { e.preventDefault(); m.run(edit ? { id: init.id, ...f } : f).catch(() => {}); };
   const supOpts = [['', '— Supplier —'], ...asList(suppliers.data).map(s => [s.id, s.name])];
+  const delCtl = useDeleteControl('medicines.delete', 'Medicine', init.id, `Remove "${init.name || 'this medicine'}" from inventory? Past prescriptions keep their record.`, close);
   return html`<${Modal} title=${edit ? 'Edit medicine' : 'Add medicine'} onClose=${close}
-    footer=${html`<button class="btn gho" onClick=${close}>Cancel</button><${SaveButton} busy=${m.busy} label="Save" onClick=${submit}/>`}>
+    footer=${html`${edit && isAdmin() && delCtl.button}<button class="btn gho" onClick=${close}>Cancel</button><${SaveButton} busy=${m.busy} label="Save" onClick=${submit}/>${delCtl.dialog}`}>
     <form onSubmit=${submit}>
       <${Field} label="Medicine name" error=${ferr(m.fieldErrors, 'name')}><${Input} value=${f.name} onInput=${set('name')} autofocus=${true}/><//>
       <div class="formgrid">

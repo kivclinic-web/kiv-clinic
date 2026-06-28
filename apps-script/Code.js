@@ -14,6 +14,7 @@ var ROUTES = {
   'users.create':        { fn: createUser_,     mutating: true, idempotent: false },
   'users.list':          { fn: listUsers_,      mutating: false },
   'users.update':        { fn: updateUser_,     mutating: true },
+  'users.resetPassword': { fn: resetUserPassword_, mutating: true, idempotent: false },
   // clients
   'clients.create':      { fn: clientsCreate_,  mutating: true },
   'clients.update':      { fn: clientsUpdate_,  mutating: true },
@@ -42,6 +43,7 @@ var ROUTES = {
   // consultations
   'consultations.create': { fn: consultationsCreate_, mutating: true },
   'consultations.byPet':  { fn: consultationsByPet_,  mutating: false },
+  'consultations.list':   { fn: consultationsList_,   mutating: false },
   'consultations.get':    { fn: consultationsGet_,    mutating: false },
   'consultations.delete': { fn: consultationsDelete_, mutating: true },
   // vaccinations & dewormings
@@ -67,7 +69,8 @@ var ROUTES = {
   'suppliers.list':         { fn: suppliersList_,     mutating: false },
   'suppliers.delete':       { fn: suppliersDelete_,   mutating: true },
   // documents
-  'documents.upload':         { fn: uploadDocument_,          mutating: true, idempotent: false },
+  'documents.upload':         { fn: uploadDocument_,          mutating: true },
+  'documents.serve':          { fn: serveDocument_,           mutating: false },
   'documents.byPet':          { fn: documentsByPet_,          mutating: false },
   'documents.byConsultation': { fn: documentsByConsultation_, mutating: false },
   'documents.delete':         { fn: deleteDocument_,          mutating: true },
@@ -97,26 +100,34 @@ function doPost(e) {
   } catch (parseErr) {
     return jsonOut_(err_(ERROR_CODES.VALIDATION_ERROR, 'Malformed JSON body'));
   }
+  try { ensureSchema_(); } catch (mErr) { console.error('migration_failed', mErr && mErr.message); }
   return jsonOut_(route_(req));
 }
 
-/** Core router: idempotency + dispatch + uniform error handling. */
+// Actions a must_reset (temp-password) session is still allowed to call (F7).
+var RESET_ALLOWED = { 'auth.login': true, 'auth.changePassword': true, 'auth.logout': true };
+
+/** Core router: schema guard + must_reset gate + central write lock + idempotency + dispatch. */
 function route_(req) {
   var action = req && req.action;
   var route = ROUTES[action];
   if (!route) return err_(ERROR_CODES.NOT_IMPLEMENTED, 'Unknown action: ' + action);
 
-  var useIdemp = route.mutating && route.idempotent !== false && req.requestId;
-  var cacheKey = useIdemp ? ('idemp:' + action + ':' + req.requestId) : null;
-  if (cacheKey) {
-    var cached = CacheService.getScriptCache().get(cacheKey);
-    if (cached) { try { return JSON.parse(cached); } catch (e) {} }
-  }
-
   try {
-    var result = route.fn(req);
-    if (result && result.ok === undefined) result = ok_(result); // tolerate handlers returning raw data
-    if (cacheKey && result.ok) CacheService.getScriptCache().put(cacheKey, JSON.stringify(result), 600);
+    // F7: a session still on its temporary password may only change it (or log out). Enforced on the
+    // SERVER so reloading the tab can't bypass the client-side reset screen. verifyToken_ is memoized
+    // per execution, so this doesn't double-cost the handler's own auth check.
+    if (req.token && !RESET_ALLOWED[action]) {
+      var claims = null;
+      try { claims = verifyToken_(req.token); } catch (e) { claims = null; }
+      if (claims && claims.must_reset) return err_(ERROR_CODES.AUTH_INVALID, 'Set a new password to continue');
+    }
+
+    // Every mutation runs under the script lock (F1/F2). Reentrant withLock_ composes with handlers
+    // that already lock. Idempotency is checked INSIDE the lock so a serialized duplicate (same
+    // requestId) sees the first result instead of re-applying (F3).
+    var run = function () { return dispatch_(route, action, req); };
+    var result = route.mutating ? withLock_(run) : run();
     return result;
   } catch (e) {
     if (e instanceof ApiError) {
@@ -126,4 +137,17 @@ function route_(req) {
     console.error('unhandled', action, e && e.stack ? e.stack : e);
     return err_(ERROR_CODES.INTERNAL, 'Unexpected server error');
   }
+}
+
+function dispatch_(route, action, req) {
+  var useIdemp = route.mutating && route.idempotent !== false && req.requestId;
+  var cacheKey = useIdemp ? ('idemp:' + action + ':' + req.requestId) : null;
+  if (cacheKey) {
+    var cached = CacheService.getScriptCache().get(cacheKey);
+    if (cached) { try { return JSON.parse(cached); } catch (e) {} }
+  }
+  var result = route.fn(req);
+  if (result && result.ok === undefined) result = ok_(result); // tolerate handlers returning raw data
+  if (cacheKey && result.ok) CacheService.getScriptCache().put(cacheKey, JSON.stringify(result), 600);
+  return result;
 }

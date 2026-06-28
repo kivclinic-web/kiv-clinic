@@ -284,6 +284,19 @@ textarea.inp{resize:vertical;min-height:80px}
 /* appointment day-strip tiles (now interactive filters) */
 .daytile{cursor:pointer;transition:.13s}.daytile:hover{border-color:var(--teal)}
 .daytile.on{border-color:var(--teal);background:var(--tealtint);box-shadow:0 8px 20px -14px rgba(14,124,110,.6)}
+/* reminders bell panel + badge */
+.bellbadge{position:absolute;top:-3px;right:-3px;min-width:16px;height:16px;padding:0 4px;border-radius:9px;background:var(--red);color:#fff;font-size:10px;font-weight:800;display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 2px var(--bg)}
+.ibtn{position:relative}
+.bellscrim{position:fixed;inset:0;z-index:40}
+.rempanel{position:absolute;top:46px;right:0;z-index:50;width:320px;max-height:70vh;overflow:auto;background:var(--surface);border:1px solid var(--line);border-radius:14px;box-shadow:0 20px 50px -20px rgba(20,40,30,.4)}
+.remhead{font-weight:800;font-size:14px;padding:13px 15px;border-bottom:1px solid var(--line)}
+.remgroup{padding:8px 0;border-bottom:1px solid var(--line)}.remgroup:last-child{border-bottom:none}
+.remglabel{display:flex;align-items:center;gap:6px;font-size:11.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--soft);padding:4px 15px}
+.remitem{display:block;width:100%;text-align:left;padding:7px 15px;font-size:13.5px;font-weight:600;color:var(--ink)}.remitem:hover{background:var(--surface2)}
+/* login setup hint + dashboard get-started list */
+.authfoot{margin-top:16px;padding-top:14px;border-top:1px solid var(--line);font-size:13px;color:var(--soft);text-align:center}.authfoot a{color:var(--teal);font-weight:600}
+.qalist{display:flex;flex-direction:column;gap:8px}
+.qalist .qarow .peta{font-weight:800}
 /* dialog (forms) */
 .modalscrim{position:fixed;inset:0;z-index:90;background:rgba(20,30,26,.42);backdrop-filter:blur(4px);display:flex;align-items:flex-start;justify-content:center;padding:60px 18px;overflow:auto}
 .modal{width:100%;max-width:560px;background:var(--surface);border:1px solid var(--line);border-radius:22px;box-shadow:0 32px 80px -20px rgba(20,40,30,.5)}

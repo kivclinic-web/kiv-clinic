@@ -17,9 +17,11 @@ var SCHEMA = {
   _meta: { columns: ['key', 'value'], softDelete: false, audit: false },
 
   auth_users: {
+    // token_epoch is appended LAST (after the std audit cols) so the v2 migration is a pure
+    // column-append — existing rows keep their column positions; empty token_epoch defaults to 1.
     columns: withStd_(['id', 'identifier', 'identifier_type', 'display_name', 'role',
       'password_hash', 'password_salt', 'status', 'must_reset',
-      'failed_attempts', 'locked_until', 'last_login_at']),
+      'failed_attempts', 'locked_until', 'last_login_at']).concat(['token_epoch']),
     unique: ['identifier']
   },
 

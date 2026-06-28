@@ -52,13 +52,21 @@ function schemaOf_(tab) {
   return s;
 }
 
-/** Run a function while holding the script lock. Throws RATE_LIMITED if it can't be acquired. */
+/**
+ * Run a function while holding the script lock. Throws RATE_LIMITED if it can't be acquired.
+ * Reentrant within one execution: if the lock is already held (e.g. the router locked the whole
+ * mutation and a handler also calls withLock_), the inner call just runs the body — no double-acquire,
+ * no deadlock. This lets us lock ALL mutations centrally in route_ while keeping existing inner locks.
+ */
+var __lockDepth = 0;
 function withLock_(fn) {
+  if (__lockDepth > 0) return fn();
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(CONFIG.LOCK_TIMEOUT_MS)) {
     throw new ApiError(ERROR_CODES.RATE_LIMITED, 'System busy, please retry');
   }
-  try { return fn(); } finally { lock.releaseLock(); }
+  __lockDepth++;
+  try { return fn(); } finally { __lockDepth--; lock.releaseLock(); }
 }
 
 /**

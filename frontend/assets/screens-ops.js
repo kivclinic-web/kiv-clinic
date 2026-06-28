@@ -2,7 +2,7 @@
 import {
   html, useState, useEffect, api, asList, isAdmin, go, Icon, toast, humanError, refreshAll, useEvent,
   useApi, useMutation, Modal, ConfirmDialog, EmptyState, ErrorState, Loading, SkeletonRows, SkeletonKpis, Spinner,
-  FreshnessLabel, initials, colorFor, fmtDate, inr, openForm, Field, Input, SaveButton
+  FreshnessLabel, copyText, initials, colorFor, fmtDate, inr, openForm, Field, Input, SaveButton
 } from './core.js';
 
 function useLiveApi(action, payload, deps = []) { const r = useApi(action, payload, deps); useEvent('kiv-refresh', () => r.reload(), deps); return r; }
@@ -97,13 +97,21 @@ function ClinicInfo() {
 
 function Users() {
   const u = useLiveApi('users.list', {}, []);
-  const [confirm, setConfirm] = useState(null);
+  const [reset, setReset] = useState(null);
+  const [confirmReset, setConfirmReset] = useState(null);
   async function toggle(user) { try { await api('users.update', { id: user.id, status: user.status === 'active' ? 'disabled' : 'active' }, { mutating: true }); toast('User updated', 'ok'); refreshAll(); } catch (e) { toast(humanError(e), 'err'); } }
+  async function doReset(user) { try { const d = await api('users.resetPassword', { id: user.id }, { mutating: true }); setConfirmReset(null); setReset(d); refreshAll(); } catch (e) { toast(humanError(e), 'err'); } }
   return html`<div class="card pad"><div class="hdr" style="margin-bottom:10px"><div class="sectttl">Users</div><button class="lnk" onClick=${() => openForm('user')}>Add user →</button></div>
     ${u.loading ? SkeletonRows(2) : asList(u.data).map(user => html`<div class="qarow"><span class="avatar" style="background:${colorFor(user.id)}">${initials(user.display_name)}</span>
       <div style="flex:1"><div style="font-weight:700;font-size:14px">${user.display_name} ${user.status === 'disabled' ? html`<span class="alsub">· disabled</span>` : ''}</div><div class="alsub">${user.identifier}</div></div>
       <span class="tag ${user.role === 'administrator' ? 'surgery' : 'opd'}">${user.role}</span>
+      <button class="lnk" style="margin-left:8px" onClick=${() => setConfirmReset(user)}>Reset password</button>
       <button class="lnk" style="margin-left:8px" onClick=${() => toggle(user)}>${user.status === 'active' ? 'Disable' : 'Enable'}</button></div>`)}
+    ${confirmReset && html`<${ConfirmDialog} title="Reset password?" confirmLabel="Reset & revoke sessions" body=${`Issue a new one-time password for ${confirmReset.display_name}? Their current sessions are signed out and they'll set a new password on next sign-in.`} onConfirm=${() => doReset(confirmReset)} onClose=${() => setConfirmReset(null)}/>`}
+    ${reset && html`<${Modal} title="Password reset" onClose=${() => setReset(null)} footer=${html`<button class="btn pri" onClick=${() => setReset(null)}>Done</button>`}>
+      <p class="mut" style="margin-top:0">New one-time password for <b>${reset.identifier}</b>. Share it securely — it won't be shown again. They'll set their own on next sign-in.</p>
+      <div class="copybox"><span>${reset.password}</span><button class="iconbtn" aria-label="Copy" onClick=${() => copyText(reset.password)}>${Icon('copy', 17)}</button></div>
+    <//>`}
   </div>`;
 }
 
