@@ -253,5 +253,32 @@ gain.
 - Revocation/logout semantics: durable `revoked_tokens` sheet remains source of truth; P5's
   CacheService set is an accelerator with an explicit, time-bounded tradeoff (§4 P5).
 - No new infrastructure: only CacheService / PropertiesService / LockService / time triggers.
-</content>
-</invoke>
+
+---
+
+## 7. Implementation status (shipped 2026-06-28)
+
+Shipped in commit `a9ec72d` and deployed (Apps Script version 3 on the stable deployment ID;
+frontend via GitHub Pages):
+
+- **P1 — request-scoped `readAll_` memoization** (`Db.js`): per-execution cache, invalidated in
+  `insert_`/`update_`/`softDelete_`; `readAll_` returns shallow array copies so caller `sort`/`filter`
+  can't corrupt the cache.
+- **P2+P3 — `dashboard.summary`** (`Domain_Reports.js`, route in `Code.js`): one handler reads each
+  table once, builds `petsById`/`clientsById`/`dewormingsByPet` maps, derives kpis+widgets+reminders.
+  Legacy `dashboard.kpis`/`dashboard.widgets`/`reminders.all` kept for compatibility.
+- **P5 — CacheService revoked-token set** (`Auth.js`): `revokedSet_()` rebuilt from the sheet on
+  cache miss (600 s TTL); `logout_` invalidates the key. Sheet stays source of truth.
+- **P6 — per-execution `prop_` cache** (`Config.js`).
+- **P10 — frontend stale-while-revalidate** (`core.js useApi`): instant paint from memory+localStorage,
+  background revalidate, skeleton only on first-ever load; `app.js` Today screen now makes one call.
+
+**Measured (warm, demo dataset):** dashboard **~9.5 s across 3 sequential calls → ~3.5 s in 1 call**;
+revisits paint instantly from SWR cache (no blocking request). Note: an individual warm request floors
+at ~2.5–3.5 s of fixed Apps Script + 302 overhead regardless of work, so **reducing request count is the
+dominant lever** at this dataset size; the read-count cuts (P1/P3) prevent the N+1 blow-up as data grows.
+
+**Deferred (not yet implemented):** P4 (reference-table CacheService), P7 (batched audit in FEFO),
+P8 (header-map cache for writes), P6-extension, warm-up time-trigger during clinic hours. P9 (column
+narrowing) rejected. These help writes / cross-request / cold-start but won't move the warm per-request
+floor much.
