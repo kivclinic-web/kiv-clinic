@@ -1,7 +1,7 @@
 // core.js — shared primitives for every screen: helpers, data hooks, the write-feedback mutation
 // pattern, toasts, modal + form controls. Screen modules import ONLY from here (no circular deps).
 import { html, render, useState, useEffect, useRef } from './vendor/preact-standalone.module.js';
-import { api, humanError, ApiError, isAdmin, getSession } from './api.js';
+import { api, humanError, ApiError, isAdmin, getSession, subscribeActivity, getActivity } from './api.js';
 import { Icon } from './icons.js';
 export { html, useState, useEffect, useRef, render, api, humanError, ApiError, isAdmin, getSession, Icon };
 
@@ -46,6 +46,49 @@ export function Toasts() {
   const [items, setItems] = useState([]);
   useEffect(() => { _toastCb = (t) => { setItems(x => [...x, t]); setTimeout(() => setItems(x => x.filter(i => i.id !== t.id)), 4200); }; return () => { _toastCb = null; }; }, []);
   return html`<div class="toasts" aria-live="polite">${items.map(t => html`<div key=${t.id} class="toast ${t.kind}">${Icon(t.kind === 'err' ? 'warn' : 'check', 17)}<span>${t.message}</span></div>`)}</div>`;
+}
+
+/* ---------- progress / activity affordances ---------- */
+/** Three animated dots — pair with a caption ("Almost there"). */
+export const LoadingDots = () => html`<span class="ldots" aria-hidden="true"><i></i><i></i><i></i></span>`;
+
+/** Cycles reassuring captions on a timer while a long call is in flight. */
+export function CyclingText({ messages, interval = 2200 }) {
+  const [i, setI] = useState(0);
+  useEffect(() => { const t = setInterval(() => setI(x => (x + 1) % messages.length), interval); return () => clearInterval(t); }, [messages.length, interval]);
+  return html`<span class="cyct">${messages[i]}${LoadingDots()}</span>`;
+}
+
+/**
+ * Faux progress bar for the highest-wait moments (login, first cold call). The fill is NOT a real
+ * measurement — it eases toward ~92% and holds, which reads as "almost done" and keeps the wait calm.
+ * When `done` flips true it snaps to 100%. Always pair with honest cycling text so we never imply a
+ * real percentage; it's purely a calming affordance over an unknowable Apps Script wait.
+ */
+export function FauxProgress({ messages = ['Connecting to the clinic server', 'Waking things up', 'Almost there'], done = false }) {
+  const [pct, setPct] = useState(8);
+  useEffect(() => {
+    if (done) { setPct(100); return; }
+    const t = setInterval(() => setPct(p => (p >= 92 ? 92 : p + Math.max(0.6, (92 - p) * 0.08))), 360);
+    return () => clearInterval(t);
+  }, [done]);
+  return html`<div class="fauxprog" role="progressbar" aria-label="Loading">
+    <div class="fauxbar"><i style=${`width:${done ? 100 : pct}%`}></i></div>
+    <div class="fauxcap"><${CyclingText} messages=${messages}/></div>
+  </div>`;
+}
+
+/**
+ * Top-right sync status dot. Teal = up to date (idle), amber (pulsing) = something syncing in the
+ * background, red = last refresh failed so on-screen data may be stale. Driven by the global api()
+ * activity signal, so it reflects SWR background revalidation automatically.
+ */
+export function SyncDot() {
+  const [st, setSt] = useState(getActivity());
+  useEffect(() => subscribeActivity(setSt), []);
+  const state = st.inflight > 0 ? 'busy' : st.failed ? 'error' : 'idle';
+  const label = state === 'busy' ? 'Syncing…' : state === 'error' ? 'Couldn’t refresh — showing saved data' : 'Up to date';
+  return html`<span class="syncdot is-${state}" role="status" title=${label} aria-label=${label}><i></i></span>`;
 }
 
 /* ---------- state primitives ---------- */

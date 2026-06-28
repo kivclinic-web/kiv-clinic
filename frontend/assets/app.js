@@ -3,7 +3,7 @@ import {
   html, render, useState, useEffect, useRef, api, isAdmin, getSession, humanError, ApiError, Icon,
   initials, colorFor, inr, asList, fmtTime, fmtDate, TYPE_CLS, TYPE_LABEL, BAR, APPT_STAT,
   go, useHashRoute, toast, Toasts, Spinner, Loading, SkeletonKpis, SkeletonRows, ErrorState, EmptyState,
-  useApi, useEvent, openForm
+  FauxProgress, SyncDot, CyclingText, useApi, useEvent, openForm
 } from './core.js';
 import { setSession, clearSession } from './api.js';
 import { APP_NAME, API_BASE } from './config.js';
@@ -46,6 +46,7 @@ function Login({ onAuthed }) {
       <div class="field"><label class="lab">Email or mobile</label><input class="inp" autocomplete="username" value=${idf} onInput=${e => { const v = e.target.value; setIdf(v); setType(/@/.test(v) ? 'email' : 'mobile'); }} placeholder="you@clinic.com"/></div>
       <div class="field"><label class="lab">Password</label><input class="inp" type="password" autocomplete="current-password" value=${pw} onInput=${e => setPw(e.target.value)} placeholder="••••••••"/></div>
       <button class="btn pri" style="width:100%;margin-top:6px" disabled=${busy}>${busy ? html`${Spinner(16)} Signing in…` : 'Sign in'}</button>
+      ${busy && html`<${FauxProgress} messages=${['Connecting to the clinic server', 'Waking the server up', 'Signing you in', 'Almost there']}/>`}
     </form>` : html`<form onSubmit=${changePw}>
       <p class="mut" style="font-size:14px;margin:0 0 14px">Set a new password to continue.</p>
       <div class="field"><label class="lab">New password</label><input class="inp" type="password" autocomplete="new-password" value=${np} onInput=${e => setNp(e.target.value)}/></div>
@@ -118,6 +119,7 @@ function Shell({ route, children, onQuick }) {
       <header class="topbar">
         <button class="search" onClick=${onQuick}><span class="nico">${Icon('search')}</span><span>Search clients, pets, medicines…</span><span class="kbd">⌘K</span></button>
         <button class="qbtn" onClick=${onQuick}><span class="nico">${Icon('plus')}</span><span>Quick add</span></button>
+        <${SyncDot}/>
         <button class="ibtn" aria-label="Notifications">${Icon('bell')}</button>
       </header>
       <div class="view">${children}</div>
@@ -159,7 +161,7 @@ function Dashboard() {
   const kpis = k.data || {};
   return html`<section data-screen-label="Today">
     <div class="hero"><div><div class="h-ey">${today}</div><div class="herobig">${greeting}</div>
-      <div class="herosub">${k.loading ? 'Loading your day…' : k.error ? 'Could not load your summary.' :
+      <div class="herosub">${k.loading ? html`<${CyclingText} messages=${['Loading your day', 'Fetching today’s schedule', 'Almost there']}/>` : k.error ? 'Could not load your summary.' :
         html`You have <b>${kpis.todays_appointments || 0} appointment${kpis.todays_appointments === 1 ? '' : 's'}</b> today — <b>${kpis.followups_today || 0} follow-up${kpis.followups_today === 1 ? '' : 's'}</b> and <b>${kpis.vaccinations_due || 0} vaccination${kpis.vaccinations_due === 1 ? '' : 's'} due</b>.${kpis.completed_appointments ? ` ${kpis.completed_appointments} already wrapped up.` : ''}`}</div></div>
       <button class="btn pri" onClick=${() => dispatchEvent(new CustomEvent('kiv-quick'))}><span class="nico">${Icon('plus')}</span>Quick add</button></div>
     ${k.loading ? SkeletonKpis() : k.error ? html`<${ErrorState} error=${k.error} onRetry=${k.reload}/>` : html`

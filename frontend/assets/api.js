@@ -27,6 +27,18 @@ export class ApiError extends Error {
   constructor(code, message, fields) { super(message || code); this.code = code; this.fields = fields || null; }
 }
 
+/* ---------- global sync-activity signal (drives the top-right status dot) ----------
+ * Every api() call increments an in-flight counter; the dot shows amber while anything (including
+ * SWR background revalidation) is in flight. A connectivity/server failure marks state "failed" so
+ * the dot goes red ("showing saved data"); the next successful call clears it. Expected app
+ * responses (validation, auth, conflict, not-found) are NOT treated as sync failures. */
+let _inflight = 0, _failed = false;
+const _activitySubs = new Set();
+const SYNC_FAIL_CODES = new Set(['NETWORK', 'INTERNAL', 'RATE_LIMITED']);
+export function getActivity() { return { inflight: _inflight, failed: _failed }; }
+export function subscribeActivity(fn) { _activitySubs.add(fn); return () => _activitySubs.delete(fn); }
+function _notifyActivity() { const st = getActivity(); _activitySubs.forEach(fn => { try { fn(st); } catch {} }); }
+
 /**
  * Call the API. Mutations auto-attach a requestId (idempotency).
  * Resolves to `data` on success; throws ApiError on failure.
@@ -36,25 +48,34 @@ export async function api(action, payload = {}, { mutating = false, requestId } 
     action, token: _token || undefined,
     requestId: mutating ? (requestId || uuid()) : undefined, payload
   });
-  let res, text;
+  _inflight++; _notifyActivity();
   try {
-    res = await fetch(API_BASE, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body, redirect: 'follow' });
-    text = await res.text();
-  } catch (e) {
-    throw new ApiError('NETWORK', 'Could not reach the server. Check your connection.');
-  }
-  let json;
-  try { json = JSON.parse(text); }
-  catch { throw new ApiError('INTERNAL', 'Unexpected server response.'); }
-  if (!json.ok) {
-    const err = json.error || {};
-    if (err.code === 'AUTH_INVALID' || err.code === 'AUTH_REQUIRED') {
-      // Session no longer valid — drop it so the app routes to login.
-      if (_token) clearSession();
+    let res, text;
+    try {
+      res = await fetch(API_BASE, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body, redirect: 'follow' });
+      text = await res.text();
+    } catch (e) {
+      throw new ApiError('NETWORK', 'Could not reach the server. Check your connection.');
     }
-    throw new ApiError(err.code || 'INTERNAL', err.message, err.fields);
+    let json;
+    try { json = JSON.parse(text); }
+    catch { throw new ApiError('INTERNAL', 'Unexpected server response.'); }
+    if (!json.ok) {
+      const err = json.error || {};
+      if (err.code === 'AUTH_INVALID' || err.code === 'AUTH_REQUIRED') {
+        // Session no longer valid — drop it so the app routes to login.
+        if (_token) clearSession();
+      }
+      throw new ApiError(err.code || 'INTERNAL', err.message, err.fields);
+    }
+    _failed = false; // a clean round trip means we're back in sync
+    return json.data;
+  } catch (e) {
+    if (e instanceof ApiError && SYNC_FAIL_CODES.has(e.code)) _failed = true;
+    throw e;
+  } finally {
+    _inflight--; _notifyActivity();
   }
-  return json.data;
 }
 
 // Human-readable fallbacks for the stable error codes (never show raw codes).
